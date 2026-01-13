@@ -9,7 +9,7 @@ export async function GET(request: NextRequest) {
 
     const status = searchParams.get('status');
     const creator = searchParams.get('creator');
-    const limit = parseInt(searchParams.get('limit') || '50');
+    const limit = parseInt(searchParams.get('limit') || '1000');
     const offset = parseInt(searchParams.get('offset') || '0');
 
     let query = supabase

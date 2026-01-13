@@ -201,7 +201,7 @@ export async function launchToken(config: LaunchConfig): Promise<LaunchResult> {
       );
 
       const feeSignature = await connection.sendTransaction(feeTransaction, [escrowWallet]);
-      await connection.confirmTransaction(feeSignature, 'confirmed');
+      // Don't wait for confirmation - transaction is already submitted
       console.log(`Platform fee of ${platformFeeSol} SOL sent to ${PLATFORM_WALLET}. Tx: ${feeSignature}`);
     } catch (feeError) {
       // Log but don't fail the launch if fee transfer fails
@@ -496,7 +496,9 @@ export async function distributeTokensToBackers(
         transaction.feePayer = escrowWallet.publicKey;
 
         const signature = await connection.sendTransaction(transaction, [escrowWallet]);
-        await connection.confirmTransaction(signature, 'confirmed');
+        // Don't wait for confirmation - transaction is already submitted
+        // Add small delay between transfers to avoid rate limiting
+        await new Promise(resolve => setTimeout(resolve, 500));
 
         results.push({
           wallet: backer.wallet,
