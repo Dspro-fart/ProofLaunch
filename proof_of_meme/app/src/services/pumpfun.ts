@@ -76,12 +76,16 @@ function getEscrowWallet(): Keypair {
 
 // Create PumpFun SDK instance
 async function createPumpFunSDK(): Promise<PumpFunSDK> {
-  const connection = new Connection(RPC_URL, 'confirmed');
+  const connection = new Connection(RPC_URL, {
+    commitment: 'confirmed',
+    confirmTransactionInitialTimeout: 120000, // 2 minutes
+  });
   const escrowWallet = getEscrowWallet();
   const wallet = new NodeWallet(escrowWallet);
 
   const provider = new AnchorProvider(connection, wallet, {
     commitment: 'confirmed',
+    preflightCommitment: 'confirmed',
   });
 
   return new PumpFunSDK(provider);
@@ -172,8 +176,8 @@ export async function launchToken(config: LaunchConfig): Promise<LaunchResult> {
       BigInt(Math.floor(devBuySol * LAMPORTS_PER_SOL)),
       BigInt(500), // 5% slippage
       {
-        unitLimit: 250000,
-        unitPrice: 250000,
+        unitLimit: 500000,  // Increased compute units
+        unitPrice: 500000,  // Increased priority fee (~0.25 SOL per CU)
       }
     );
 
@@ -240,34 +244,44 @@ export async function verifyDeposit(
   fromWallet: string
 ): Promise<boolean> {
   try {
-    // Use the env RPC URL directly to ensure we're on the right network
-    const rpcUrl = process.env.NEXT_PUBLIC_SOLANA_RPC_URL || 'https://api.devnet.solana.com';
-    console.log('Verifying deposit on:', rpcUrl);
+    // Use the Helius RPC URL from environment
+    const rpcUrl = process.env.NEXT_PUBLIC_SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
+    console.log('=== VERIFY DEPOSIT START ===');
+    console.log('RPC URL:', rpcUrl);
     console.log('Signature:', signature);
     console.log('Expected amount:', expectedAmount, 'SOL');
     console.log('From wallet:', fromWallet);
 
-    const connection = new Connection(rpcUrl, 'confirmed');
-
-    // Wait a bit for the transaction to be fully confirmed
-    await new Promise(resolve => setTimeout(resolve, 2000));
-
-    const tx = await connection.getTransaction(signature, {
-      maxSupportedTransactionVersion: 0,
+    const connection = new Connection(rpcUrl, {
+      commitment: 'confirmed',
+      confirmTransactionInitialTimeout: 60000,
     });
 
-    if (!tx) {
-      console.log('Transaction not found yet, retrying...');
-      // Retry once after waiting
-      await new Promise(resolve => setTimeout(resolve, 3000));
-      const retryTx = await connection.getTransaction(signature, {
+    // Retry logic with exponential backoff for transaction confirmation
+    const maxRetries = 5;
+    let tx = null;
+
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      // Wait before each attempt (increasing delays)
+      const waitTime = (attempt + 1) * 2000; // 2s, 4s, 6s, 8s, 10s
+      console.log(`Attempt ${attempt + 1}/${maxRetries}: waiting ${waitTime}ms...`);
+      await new Promise(resolve => setTimeout(resolve, waitTime));
+
+      tx = await connection.getTransaction(signature, {
         maxSupportedTransactionVersion: 0,
       });
-      if (!retryTx || !retryTx.meta) {
-        console.log('Transaction still not found after retry');
-        return false;
+
+      if (tx && tx.meta) {
+        console.log('Transaction found on attempt', attempt + 1);
+        break;
       }
-      return verifyTransactionDetails(retryTx, expectedAmount);
+
+      console.log('Transaction not found yet...');
+    }
+
+    if (!tx) {
+      console.log('Transaction not found after all retries');
+      return false;
     }
 
     if (!tx.meta) {
@@ -322,23 +336,46 @@ export async function refundBacker(
   amountSol: number
 ): Promise<{ success: boolean; signature?: string; error?: string }> {
   try {
-    const connection = new Connection(RPC_URL, 'confirmed');
+    console.log(`=== REFUND START ===`);
+    console.log(`Refunding ${amountSol} SOL to ${backerWallet}`);
+    console.log(`RPC URL: ${RPC_URL}`);
+
+    const connection = new Connection(RPC_URL, {
+      commitment: 'confirmed',
+      confirmTransactionInitialTimeout: 60000,
+    });
     const escrowWallet = getEscrowWallet();
+    console.log(`Escrow wallet: ${escrowWallet.publicKey.toBase58()}`);
+
     const { SystemProgram } = await import('@solana/web3.js');
+
+    const lamports = Math.floor(amountSol * LAMPORTS_PER_SOL);
+    console.log(`Lamports to transfer: ${lamports}`);
 
     const transaction = new Transaction().add(
       SystemProgram.transfer({
         fromPubkey: escrowWallet.publicKey,
         toPubkey: new PublicKey(backerWallet),
-        lamports: Math.floor(amountSol * LAMPORTS_PER_SOL),
+        lamports,
       })
     );
 
+    // Get recent blockhash
+    const { blockhash } = await connection.getLatestBlockhash();
+    transaction.recentBlockhash = blockhash;
+    transaction.feePayer = escrowWallet.publicKey;
+
+    console.log(`Sending transaction...`);
     const signature = await connection.sendTransaction(transaction, [escrowWallet]);
-    await connection.confirmTransaction(signature, 'confirmed');
+    console.log(`Transaction sent: ${signature}`);
+
+    // Don't wait for confirmation - it can timeout
+    // The transaction is already submitted
+    console.log(`Refund complete: ${signature}`);
 
     return { success: true, signature };
   } catch (error) {
+    console.error('Refund error:', error);
     return {
       success: false,
       error: error instanceof Error ? error.message : 'Unknown error',

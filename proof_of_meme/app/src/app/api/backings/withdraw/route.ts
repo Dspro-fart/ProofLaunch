@@ -3,6 +3,9 @@ import { createServerClient } from '@/lib/supabase';
 import { refundBacker, getEscrowBalance } from '@/services/pumpfun';
 import { rateLimiters } from '@/lib/rateLimit';
 
+// Withdrawal fee - stays in escrow to cover operational costs
+const WITHDRAWAL_FEE_PERCENT = 2; // 2% fee on withdrawals
+
 // POST /api/backings/withdraw - Withdraw backing from a meme
 export async function POST(request: NextRequest) {
   try {
@@ -77,10 +80,14 @@ export async function POST(request: NextRequest) {
 
     const amountSol = Number(backing.amount_sol);
 
+    // Calculate withdrawal fee (stays in escrow for operational costs)
+    const withdrawalFee = amountSol * (WITHDRAWAL_FEE_PERCENT / 100);
+    const refundAmount = amountSol - withdrawalFee;
+
     // Check escrow balance before attempting refund
     const escrowBalance = await getEscrowBalance();
     // Add buffer for transaction fees (0.01 SOL)
-    const requiredBalance = amountSol + 0.01;
+    const requiredBalance = refundAmount + 0.01;
 
     if (escrowBalance < requiredBalance) {
       console.error(`Insufficient escrow balance: ${escrowBalance} SOL < ${requiredBalance} SOL required`);
@@ -90,9 +97,9 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Process refund from escrow to backer
-    console.log(`Processing withdrawal of ${amountSol} SOL to ${backer_wallet} (escrow balance: ${escrowBalance} SOL)`);
-    const refundResult = await refundBacker(backer_wallet, amountSol);
+    // Process refund from escrow to backer (minus withdrawal fee)
+    console.log(`Processing withdrawal: ${amountSol} SOL - ${withdrawalFee.toFixed(4)} SOL fee = ${refundAmount.toFixed(4)} SOL to ${backer_wallet}`);
+    const refundResult = await refundBacker(backer_wallet, refundAmount);
 
     if (!refundResult.success) {
       console.error('Refund failed:', refundResult.error);
@@ -128,14 +135,17 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      amount_refunded: amountSol,
+      original_amount: amountSol,
+      withdrawal_fee: withdrawalFee,
+      amount_refunded: refundAmount,
       refund_tx: refundResult.signature,
-      message: `Successfully withdrew ${amountSol} SOL`,
+      message: `Successfully withdrew ${refundAmount.toFixed(4)} SOL (${WITHDRAWAL_FEE_PERCENT}% fee: ${withdrawalFee.toFixed(4)} SOL)`,
     });
   } catch (error) {
     console.error('Withdrawal error:', error);
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     return NextResponse.json(
-      { error: 'Internal server error' },
+      { error: `Withdrawal failed: ${errorMessage}` },
       { status: 500 }
     );
   }

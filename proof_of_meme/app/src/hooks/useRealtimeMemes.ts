@@ -20,6 +20,7 @@ export function useRealtimeMemes({ status = 'all', enabled = true }: UseRealtime
     try {
       const params = new URLSearchParams();
       if (status !== 'all') params.set('status', status);
+      params.set('limit', '1000'); // Fetch up to 1000 memes
 
       const response = await fetch(`/api/memes?${params}`);
       if (!response.ok) throw new Error('Failed to fetch memes');

@@ -2,11 +2,13 @@
 
 import { useState, useMemo } from 'react';
 import { MemeCard } from '@/components/MemeCard';
-import { Flame, TrendingUp, Users, Search, Loader2, Shield, ArrowUpDown, SlidersHorizontal } from 'lucide-react';
+import { Flame, TrendingUp, Users, Search, Loader2, Shield, ArrowUpDown, SlidersHorizontal, ChevronLeft, ChevronRight } from 'lucide-react';
 import { useRealtimeMemes } from '@/hooks/useRealtimeMemes';
 import type { Meme } from '@/types/database';
 
 type SortOption = 'newest' | 'trust_high' | 'trust_low' | 'progress' | 'ending_soon';
+
+const ITEMS_PER_PAGE = 20;
 
 export default function Home() {
   const [filter, setFilter] = useState<'all' | 'backing' | 'live'>('all');
@@ -14,6 +16,7 @@ export default function Home() {
   const [sortBy, setSortBy] = useState<SortOption>('newest');
   const [minTrustScore, setMinTrustScore] = useState(0);
   const [showFilters, setShowFilters] = useState(false);
+  const [currentPage, setCurrentPage] = useState(1);
 
   // Use real-time memes hook
   const { memes, loading } = useRealtimeMemes({ status: filter });
@@ -61,6 +64,34 @@ export default function Home() {
     return result;
   }, [memes, search, minTrustScore, sortBy]);
 
+  // Pagination
+  const totalPages = Math.ceil(filteredMemes.length / ITEMS_PER_PAGE);
+  const paginatedMemes = useMemo(() => {
+    const startIndex = (currentPage - 1) * ITEMS_PER_PAGE;
+    return filteredMemes.slice(startIndex, startIndex + ITEMS_PER_PAGE);
+  }, [filteredMemes, currentPage]);
+
+  // Reset to page 1 when filters change
+  const handleFilterChange = (newFilter: 'all' | 'backing' | 'live') => {
+    setFilter(newFilter);
+    setCurrentPage(1);
+  };
+
+  const handleSearchChange = (value: string) => {
+    setSearch(value);
+    setCurrentPage(1);
+  };
+
+  const handleSortChange = (value: SortOption) => {
+    setSortBy(value);
+    setCurrentPage(1);
+  };
+
+  const handleTrustScoreChange = (value: number) => {
+    setMinTrustScore(value);
+    setCurrentPage(1);
+  };
+
   const statsDisplay = [
     { label: 'Active in Proving', value: stats.activeProving.toString(), icon: Flame, color: 'text-[var(--accent)]' },
     { label: 'Total Backed', value: `${stats.totalBacked.toFixed(1)} SOL`, icon: TrendingUp, color: 'text-[var(--success)]' },
@@ -101,9 +132,9 @@ export default function Home() {
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-[var(--muted)]" />
             <input
               type="text"
-              placeholder="Search memes..."
+              placeholder="Search by name or symbol..."
               value={search}
-              onChange={(e) => setSearch(e.target.value)}
+              onChange={(e) => handleSearchChange(e.target.value)}
               className="w-full pl-10 pr-4 py-3 rounded-lg bg-[var(--card)] border border-[var(--border)] focus:border-[var(--accent)] focus:outline-none transition-colors"
             />
           </div>
@@ -115,7 +146,7 @@ export default function Home() {
             ] as const).map((f) => (
               <button
                 key={f.key}
-                onClick={() => setFilter(f.key)}
+                onClick={() => handleFilterChange(f.key)}
                 className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
                   filter === f.key
                     ? 'bg-[var(--accent)] text-white'
@@ -148,7 +179,7 @@ export default function Home() {
               <span className="text-sm text-[var(--muted)]">Sort by:</span>
               <select
                 value={sortBy}
-                onChange={(e) => setSortBy(e.target.value as SortOption)}
+                onChange={(e) => handleSortChange(e.target.value as SortOption)}
                 className="px-3 py-2 rounded-lg bg-[var(--background)] border border-[var(--border)] text-sm focus:border-[var(--accent)] focus:outline-none"
               >
                 <option value="newest">Newest</option>
@@ -168,7 +199,7 @@ export default function Home() {
                 min="0"
                 max="100"
                 value={minTrustScore}
-                onChange={(e) => setMinTrustScore(Number(e.target.value))}
+                onChange={(e) => handleTrustScoreChange(Number(e.target.value))}
                 className="flex-1 h-2 rounded-lg appearance-none cursor-pointer accent-[var(--accent)]"
               />
               <span className={`text-sm font-medium min-w-[3rem] ${
@@ -186,6 +217,7 @@ export default function Home() {
                 onClick={() => {
                   setMinTrustScore(0);
                   setSortBy('newest');
+                  setCurrentPage(1);
                 }}
                 className="text-sm text-[var(--accent)] hover:underline"
               >
@@ -203,12 +235,77 @@ export default function Home() {
         </div>
       )}
 
-      {/* Meme Grid */}
+      {/* Results Count */}
       {!loading && filteredMemes.length > 0 && (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {filteredMemes.map((meme) => (
+        <div className="flex justify-between items-center text-sm text-[var(--muted)]">
+          <span>
+            Showing {((currentPage - 1) * ITEMS_PER_PAGE) + 1}-{Math.min(currentPage * ITEMS_PER_PAGE, filteredMemes.length)} of {filteredMemes.length} memes
+          </span>
+          {totalPages > 1 && (
+            <span>Page {currentPage} of {totalPages}</span>
+          )}
+        </div>
+      )}
+
+      {/* Meme Grid */}
+      {!loading && paginatedMemes.length > 0 && (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+          {paginatedMemes.map((meme) => (
             <MemeCard key={meme.id} meme={meme as any} />
           ))}
+        </div>
+      )}
+
+      {/* Pagination */}
+      {!loading && totalPages > 1 && (
+        <div className="flex justify-center items-center gap-2">
+          <button
+            onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+            disabled={currentPage === 1}
+            className="p-2 rounded-lg bg-[var(--card)] border border-[var(--border)] disabled:opacity-50 disabled:cursor-not-allowed hover:bg-[var(--background)] transition-colors"
+          >
+            <ChevronLeft className="w-5 h-5" />
+          </button>
+
+          {/* Page numbers */}
+          <div className="flex gap-1">
+            {Array.from({ length: totalPages }, (_, i) => i + 1)
+              .filter(page => {
+                // Show first, last, current, and nearby pages
+                if (page === 1 || page === totalPages) return true;
+                if (Math.abs(page - currentPage) <= 2) return true;
+                return false;
+              })
+              .map((page, index, array) => {
+                // Add ellipsis if there's a gap
+                const showEllipsisBefore = index > 0 && page - array[index - 1] > 1;
+                return (
+                  <div key={page} className="flex items-center gap-1">
+                    {showEllipsisBefore && (
+                      <span className="px-2 text-[var(--muted)]">...</span>
+                    )}
+                    <button
+                      onClick={() => setCurrentPage(page)}
+                      className={`min-w-[40px] h-10 rounded-lg font-medium transition-colors ${
+                        currentPage === page
+                          ? 'bg-[var(--accent)] text-white'
+                          : 'bg-[var(--card)] border border-[var(--border)] hover:bg-[var(--background)]'
+                      }`}
+                    >
+                      {page}
+                    </button>
+                  </div>
+                );
+              })}
+          </div>
+
+          <button
+            onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+            disabled={currentPage === totalPages}
+            className="p-2 rounded-lg bg-[var(--card)] border border-[var(--border)] disabled:opacity-50 disabled:cursor-not-allowed hover:bg-[var(--background)] transition-colors"
+          >
+            <ChevronRight className="w-5 h-5" />
+          </button>
         </div>
       )}
 

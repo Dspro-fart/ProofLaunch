@@ -1,10 +1,15 @@
 'use client';
 
 import { useState, useRef, useMemo } from 'react';
-import { useWallet } from '@solana/wallet-adapter-react';
+import { useWallet, useConnection } from '@solana/wallet-adapter-react';
 import { useRouter } from 'next/navigation';
-import { Upload, Info, Rocket, AlertCircle, Image, Link2, X, CheckCircle, Shield } from 'lucide-react';
+import { Upload, Info, Rocket, AlertCircle, Image, Link2, X, CheckCircle, Shield, Coins } from 'lucide-react';
 import { calculateTrustScore, getTrustScoreColor, getTrustScoreLabel, getTrustScoreBgColor } from '@/lib/trustScore';
+import { PublicKey, Transaction, SystemProgram, LAMPORTS_PER_SOL } from '@solana/web3.js';
+
+// Creation fee in SOL (goes towards the meme's backing)
+const CREATION_FEE_SOL = 0.01;
+const ESCROW_WALLET = new PublicKey('HfkGmHTpQigABpkSK3ECETTxdBgFyt2CgYVoCLDqDffv');
 
 // Validation helpers
 const FORBIDDEN_WORDS = ['scam', 'rug', 'rugpull', 'hack', 'steal'];
@@ -62,7 +67,8 @@ function validateUrl(url: string, pattern?: RegExp, name?: string): string | und
 }
 
 export default function SubmitPage() {
-  const { connected, publicKey } = useWallet();
+  const { connected, publicKey, sendTransaction } = useWallet();
+  const { connection } = useConnection();
   const router = useRouter();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [formData, setFormData] = useState({
@@ -184,17 +190,31 @@ export default function SubmitPage() {
     setError(null);
 
     try {
-      // For now, use a placeholder image URL
-      // In production: upload to IPFS/Arweave first
+      // Step 1: Pay the creation fee (goes to escrow as initial backing)
+      const creationFeeLamports = CREATION_FEE_SOL * LAMPORTS_PER_SOL;
+
+      const transaction = new Transaction().add(
+        SystemProgram.transfer({
+          fromPubkey: publicKey,
+          toPubkey: ESCROW_WALLET,
+          lamports: creationFeeLamports,
+        })
+      );
+
+      const { blockhash } = await connection.getLatestBlockhash();
+      transaction.recentBlockhash = blockhash;
+      transaction.feePayer = publicKey;
+
+      const signature = await sendTransaction(transaction, connection);
+
+      // Wait briefly for transaction to propagate
+      // The API will verify the transaction - no need to wait for full confirmation
+      await new Promise(resolve => setTimeout(resolve, 2000));
+
+      // Step 2: Create the meme with the payment signature
       let imageUrl = 'https://placehold.co/400x400/1a1a2e/ffffff?text=' + formData.symbol;
 
       if (imageFile) {
-        // TODO: Upload to IPFS
-        // const formData = new FormData();
-        // formData.append('file', imageFile);
-        // const ipfsResponse = await fetch('/api/upload', { method: 'POST', body: formData });
-        // imageUrl = (await ipfsResponse.json()).url;
-
         // For now, use data URL (not ideal for production)
         imageUrl = imagePreview || imageUrl;
       }
@@ -220,6 +240,9 @@ export default function SubmitPage() {
           dev_initial_buy_sol: formData.devInitialBuySol,
           auto_refund: formData.autoRefund,
           trust_score: trustScore.total,
+          // Creation fee payment
+          creation_fee_signature: signature,
+          creation_fee_sol: CREATION_FEE_SOL,
         }),
       });
 
@@ -728,6 +751,20 @@ export default function SubmitPage() {
             </div>
           </div>
 
+          {/* Creation Fee Info */}
+          <div className="bg-[var(--warning)]/10 border border-[var(--warning)]/30 rounded-lg p-4">
+            <div className="flex gap-3">
+              <Coins className="w-5 h-5 text-[var(--warning)] flex-shrink-0 mt-0.5" />
+              <div className="text-sm">
+                <p className="font-medium text-[var(--warning)] mb-1">Creation Fee: {CREATION_FEE_SOL} SOL</p>
+                <p className="text-[var(--muted)]">
+                  A small fee is required to submit your meme. This fee becomes your first backing
+                  and helps prevent spam. You'll need to approve a transaction in your wallet.
+                </p>
+              </div>
+            </div>
+          </div>
+
           {/* Info Box */}
           <div className="bg-[var(--accent)]/10 border border-[var(--accent)]/30 rounded-lg p-4">
             <div className="flex gap-3">
@@ -737,7 +774,7 @@ export default function SubmitPage() {
                 <p className="text-[var(--muted)]">
                   Once your meme reaches its SOL goal, it will automatically launch on Pump.fun.
                   Your token will be instantly visible on Axiom, Photon, and other aggregators.
-                  If the goal isn't reached, backers get their SOL back.
+                  If the goal isn't reached, backers get their SOL back (minus 2% withdrawal fee).
                 </p>
               </div>
             </div>
@@ -752,12 +789,12 @@ export default function SubmitPage() {
             {isSubmitting ? (
               <>
                 <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                Submitting...
+                Processing Payment...
               </>
             ) : (
               <>
                 <Rocket className="w-5 h-5" />
-                Submit to Proving Grounds
+                Pay {CREATION_FEE_SOL} SOL & Submit
               </>
             )}
           </button>

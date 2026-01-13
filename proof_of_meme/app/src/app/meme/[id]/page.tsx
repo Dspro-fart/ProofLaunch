@@ -74,6 +74,7 @@ export default function MemeDetailPage() {
   const [showWithdrawConfirm, setShowWithdrawConfirm] = useState(false);
   const [showLaunchConfirm, setShowLaunchConfirm] = useState(false);
   const [pendingWithdrawWallet, setPendingWithdrawWallet] = useState<string | null>(null);
+  const [pendingWithdrawAmount, setPendingWithdrawAmount] = useState<number>(0);
 
   // Use real-time hooks for meme and backings
   const { meme, loading, error, refetch: refetchMeme } = useRealtimeMeme(id as string);
@@ -141,9 +142,10 @@ export default function MemeDetailPage() {
       setBackingStatus('Please approve in wallet...');
       const signature = await sendTransaction(transaction, connection);
 
-      // 3. Wait for confirmation
-      setBackingStatus('Confirming transaction...');
-      await connection.confirmTransaction(signature, 'confirmed');
+      // 3. Wait briefly for transaction to propagate, then proceed
+      // The API will verify the transaction - no need to wait for full confirmation
+      setBackingStatus('Processing transaction...');
+      await new Promise(resolve => setTimeout(resolve, 2000));
 
       // 4. Register backing with API
       setBackingStatus('Registering backing...');
@@ -227,6 +229,10 @@ export default function MemeDetailPage() {
   };
 
   const requestWithdraw = (backerWallet: string) => {
+    // Find the backing amount for this wallet
+    const backing = backings.find(b => b.backer_wallet === backerWallet);
+    const amount = backing ? Number(backing.amount_sol) : 0;
+    setPendingWithdrawAmount(amount);
     setPendingWithdrawWallet(backerWallet);
     setShowWithdrawConfirm(true);
   };
@@ -236,6 +242,7 @@ export default function MemeDetailPage() {
     if (pendingWithdrawWallet) {
       handleWithdraw(pendingWithdrawWallet);
       setPendingWithdrawWallet(null);
+      setPendingWithdrawAmount(0);
     }
   };
 
@@ -594,6 +601,10 @@ export default function MemeDetailPage() {
                   ? 'If goal not reached, automatic refund to all backers'
                   : 'Manual refunds if goal not reached'}
               </li>
+              <li className="flex items-start gap-2">
+                <span className="text-[var(--warning)]">•</span>
+                Early withdrawal fee: 2% (to cover platform costs)
+              </li>
             </ul>
           </div>
         </div>
@@ -770,11 +781,12 @@ export default function MemeDetailPage() {
         onClose={() => {
           setShowWithdrawConfirm(false);
           setPendingWithdrawWallet(null);
+          setPendingWithdrawAmount(0);
         }}
         onConfirm={confirmWithdraw}
         title="Confirm Withdrawal"
-        message={`Are you sure you want to withdraw your backing? Your SOL will be returned to your wallet.`}
-        confirmText="Withdraw"
+        message={`Withdraw ${pendingWithdrawAmount.toFixed(4)} SOL?\n\nA 2% withdrawal fee (${(pendingWithdrawAmount * 0.02).toFixed(4)} SOL) will be deducted.\n\nYou will receive: ${(pendingWithdrawAmount * 0.98).toFixed(4)} SOL`}
+        confirmText={`Withdraw ${(pendingWithdrawAmount * 0.98).toFixed(4)} SOL`}
         variant="warning"
         isLoading={withdrawing}
       />
