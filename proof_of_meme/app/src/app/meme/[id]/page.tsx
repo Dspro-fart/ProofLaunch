@@ -1,31 +1,32 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useParams } from 'next/navigation';
 import { useWallet, useConnection } from '@solana/wallet-adapter-react';
-import { PublicKey, Transaction, SystemProgram, LAMPORTS_PER_SOL } from '@solana/web3.js';
+import { PublicKey, Transaction, SystemProgram, LAMPORTS_PER_SOL, Keypair } from '@solana/web3.js';
 import {
   ArrowLeft,
   Users,
   Target,
   Clock,
   ArrowUpRight,
-  ArrowDownRight,
   Copy,
   Check,
-  Loader2
+  Loader2,
+  Info,
+  Coins,
+  Key,
+  ExternalLink
 } from 'lucide-react';
 import Link from 'next/link';
-import type { Meme } from '@/types/database';
 import { MemeChat } from '@/components/MemeChat';
 import { BackersList } from '@/components/BackersList';
 import { TrustScoreDisplay } from '@/components/TrustScoreDisplay';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
+import { ClaimRewards } from '@/components/ClaimRewards';
 import { calculateTrustScore } from '@/lib/trustScore';
 import { useRealtimeMeme, useRealtimeBackings } from '@/hooks/useRealtimeMemes';
-
-// Escrow wallet address - MAINNET
-const ESCROW_WALLET = 'HfkGmHTpQigABpkSK3ECETTxdBgFyt2CgYVoCLDqDffv';
+import { createBurnerWallet, getSignMessage } from '@/lib/burnerWallet';
 
 // Calculate time remaining from deadline
 function getTimeRemaining(deadline: string): string {
@@ -59,7 +60,7 @@ function getStatusConfig(status: string) {
 
 export default function MemeDetailPage() {
   const { id } = useParams();
-  const { connected, publicKey, sendTransaction } = useWallet();
+  const { connected, publicKey, sendTransaction, signMessage } = useWallet();
   const { connection } = useConnection();
   const [amount, setAmount] = useState('');
   const [tradeType, setTradeType] = useState<'back' | 'buy' | 'sell'>('back');
@@ -75,10 +76,74 @@ export default function MemeDetailPage() {
   const [showLaunchConfirm, setShowLaunchConfirm] = useState(false);
   const [pendingWithdrawWallet, setPendingWithdrawWallet] = useState<string | null>(null);
   const [pendingWithdrawAmount, setPendingWithdrawAmount] = useState<number>(0);
+  // Burner wallet state
+  const [pendingBurnerKeypair, setPendingBurnerKeypair] = useState<Keypair | null>(null);
+  const [showBurnerInfo, setShowBurnerInfo] = useState(false);
+  // Sweep state
+  const [sweeping, setSweeping] = useState(false);
+  const [sweepStatus, setSweepStatus] = useState<string | null>(null);
+  const [burnerInfo, setBurnerInfo] = useState<{
+    burner_wallet: string;
+    buy_executed: boolean;
+    amount_sol: number | null;
+    swept: boolean;
+    sweep_action: string | null;
+  } | null>(null);
+  const [showExportKey, setShowExportKey] = useState(false);
+  const [exportedKey, setExportedKey] = useState<string | null>(null);
+  const [exportKeyCopied, setExportKeyCopied] = useState(false);
+
+  // Platform config
+  const [escrowAddress, setEscrowAddress] = useState<string | null>(null);
+  const PLATFORM_FEE_PERCENT = 0.02; // 2%
 
   // Use real-time hooks for meme and backings
   const { meme, loading, error, refetch: refetchMeme } = useRealtimeMeme(id as string);
   const { backings, refetch: refetchBackings } = useRealtimeBackings(id as string);
+
+  // Fetch platform config (escrow address)
+  useEffect(() => {
+    fetch('/api/config')
+      .then(res => res.json())
+      .then(data => {
+        if (data.escrow_address) {
+          setEscrowAddress(data.escrow_address);
+        }
+      })
+      .catch(err => console.error('Failed to fetch config:', err));
+  }, []);
+
+  // Set trade type based on meme status
+  useEffect(() => {
+    if (meme?.status === 'live') {
+      setTradeType('buy'); // Default to buy for live tokens
+    } else {
+      setTradeType('back'); // Default to back for proving tokens
+    }
+  }, [meme?.status]);
+
+  // Fetch burner wallet info when viewing a launched token
+  useEffect(() => {
+    const fetchBurnerInfo = async () => {
+      if (!meme || meme.status !== 'live' || !connected || !publicKey) return;
+
+      try {
+        const response = await fetch(
+          `/api/sweep?meme_id=${meme.id}&backer_wallet=${publicKey.toBase58()}`
+        );
+        if (response.ok) {
+          const data = await response.json();
+          setBurnerInfo(data);
+        }
+        // 404 is expected if user is not a backer - no need to log
+      } catch (err) {
+        // Network errors only
+        console.error('Failed to fetch burner info:', err);
+      }
+    };
+
+    fetchBurnerInfo();
+  }, [meme, connected, publicKey]);
 
   const handleCopy = (text: string) => {
     navigator.clipboard.writeText(text);
@@ -87,7 +152,7 @@ export default function MemeDetailPage() {
   };
 
   const handleBack = async () => {
-    if (!connected || !publicKey || !amount || !meme) return;
+    if (!connected || !publicKey || !signMessage || !amount || !meme) return;
 
     const amountSol = parseFloat(amount);
     if (isNaN(amountSol) || amountSol <= 0) {
@@ -95,59 +160,87 @@ export default function MemeDetailPage() {
       return;
     }
 
-    // Check max backing limit (10% of goal)
-    const maxBackingPerWallet = Number(meme.backing_goal_sol) * 0.1;
+    // Check if user already has an active backing
     const myExistingBacking = backings.find(
       (b) => b.backer_wallet === publicKey.toBase58() && b.status !== 'withdrawn'
     );
-    const existingAmount = myExistingBacking ? Number(myExistingBacking.amount_sol) : 0;
-    const totalAfterBacking = existingAmount + amountSol;
+    if (myExistingBacking) {
+      setBackingStatus(
+        `Error: You already have an active backing of ${Number(myExistingBacking.amount_sol).toFixed(2)} SOL. Withdraw first to change your amount.`
+      );
+      return;
+    }
 
-    if (totalAfterBacking > maxBackingPerWallet) {
-      const remainingAllowance = Math.max(0, maxBackingPerWallet - existingAmount);
-      if (remainingAllowance <= 0) {
-        setBackingStatus(
-          `Error: You've reached the max backing limit of ${maxBackingPerWallet.toFixed(2)} SOL per wallet.`
-        );
-      } else {
-        setBackingStatus(
-          `Error: Max ${maxBackingPerWallet.toFixed(2)} SOL per wallet. You can only back ${remainingAllowance.toFixed(2)} more SOL.`
-        );
-      }
+    // Check max backing limit (20% of goal)
+    const maxBackingPerWallet = Number(meme.backing_goal_sol) * 0.2;
+    if (amountSol > maxBackingPerWallet) {
+      setBackingStatus(
+        `Error: Maximum backing is ${maxBackingPerWallet.toFixed(2)} SOL per wallet (20% of goal).`
+      );
       return;
     }
 
     setBacking(true);
-    setBackingStatus('Creating transaction...');
+    setBackingStatus('Creating token wallet...');
 
     try {
-      // 1. Create SOL transfer transaction to escrow
-      const escrowPubkey = new PublicKey(ESCROW_WALLET);
-      const lamports = Math.floor(amountSol * LAMPORTS_PER_SOL);
+      // 1. Sign message to verify wallet ownership
+      setBackingStatus('Sign to verify your wallet...');
+      const messageToSign = getSignMessage(meme.id);
+      const encodedMessage = new TextEncoder().encode(messageToSign);
+      await signMessage(encodedMessage);
 
-      const transaction = new Transaction().add(
+      // 2. Generate token wallet (private key sent to server over HTTPS)
+      setBackingStatus('Generating token wallet...');
+      const burnerWallet = createBurnerWallet();
+
+      // Store the keypair temporarily so user can export it after success
+      setPendingBurnerKeypair(burnerWallet.keypair);
+
+      // 3. Create SOL transfer transaction to burner wallet + platform fee
+      // User sends backing amount to burner wallet, and 2% fee to escrow
+      const burnerPubkey = new PublicKey(burnerWallet.publicKey);
+      const backingLamports = Math.floor(amountSol * LAMPORTS_PER_SOL);
+      const feeLamports = Math.floor(amountSol * PLATFORM_FEE_PERCENT * LAMPORTS_PER_SOL);
+
+      const transaction = new Transaction();
+
+      // Transfer backing amount to burner wallet
+      transaction.add(
         SystemProgram.transfer({
           fromPubkey: publicKey,
-          toPubkey: escrowPubkey,
-          lamports,
+          toPubkey: burnerPubkey,
+          lamports: backingLamports,
         })
       );
+
+      // Transfer 2% platform fee to escrow wallet
+      if (escrowAddress && feeLamports > 0) {
+        const escrowPubkey = new PublicKey(escrowAddress);
+        transaction.add(
+          SystemProgram.transfer({
+            fromPubkey: publicKey,
+            toPubkey: escrowPubkey,
+            lamports: feeLamports,
+          })
+        );
+      }
 
       // Get recent blockhash
       const { blockhash } = await connection.getLatestBlockhash();
       transaction.recentBlockhash = blockhash;
       transaction.feePayer = publicKey;
 
-      // 2. Send transaction via wallet
-      setBackingStatus('Please approve in wallet...');
-      const signature = await sendTransaction(transaction, connection);
+      // 4. Send transaction via wallet
+      const totalSol = (amountSol * (1 + PLATFORM_FEE_PERCENT)).toFixed(4);
+      setBackingStatus(`Approve transfer of ${totalSol} SOL...`);
+      const txSignature = await sendTransaction(transaction, connection);
 
-      // 3. Wait briefly for transaction to propagate, then proceed
-      // The API will verify the transaction - no need to wait for full confirmation
+      // 5. Wait briefly for transaction to propagate
       setBackingStatus('Processing transaction...');
       await new Promise(resolve => setTimeout(resolve, 2000));
 
-      // 4. Register backing with API
+      // 6. Register backing with API (private key sent securely over HTTPS)
       setBackingStatus('Registering backing...');
       const response = await fetch('/api/backings', {
         method: 'POST',
@@ -156,7 +249,10 @@ export default function MemeDetailPage() {
           meme_id: meme.id,
           backer_wallet: publicKey.toBase58(),
           amount_sol: amountSol,
-          deposit_tx: signature,
+          deposit_tx: txSignature,
+          // Burner wallet data - private key encrypted server-side
+          burner_wallet: burnerWallet.publicKey,
+          burner_private_key: burnerWallet.privateKey,
         }),
       });
 
@@ -167,22 +263,23 @@ export default function MemeDetailPage() {
 
       setBackingStatus('Backing successful!');
       setAmount('');
+      setShowBurnerInfo(true); // Show the burner wallet export info
 
       // Refresh meme data and backings to show updates
       await Promise.all([refetchMeme(), refetchBackings()]);
 
-      // Clear status after a moment
-      setTimeout(() => setBackingStatus(null), 3000);
     } catch (err) {
       console.error('Backing failed:', err);
       setBackingStatus(`Error: ${err instanceof Error ? err.message : 'Transaction failed'}`);
+      setPendingBurnerKeypair(null);
     } finally {
       setBacking(false);
     }
   };
 
   const handleTrade = () => {
-    if (tradeType === 'back') {
+    // Only allow backing for tokens in 'backing' status
+    if (tradeType === 'back' && meme?.status === 'backing') {
       // Validate amount before showing confirmation
       const amountSol = parseFloat(amount);
       if (isNaN(amountSol) || amountSol <= 0) {
@@ -190,26 +287,25 @@ export default function MemeDetailPage() {
         return;
       }
 
-      // Pre-check backing limit before showing dialog
+      // Pre-check before showing dialog
       if (meme) {
-        const maxBackingPerWallet = Number(meme.backing_goal_sol) * 0.1;
+        // Check if user already has an active backing
         const myExistingBacking = backings.find(
           (b) => b.backer_wallet === publicKey?.toBase58() && b.status !== 'withdrawn'
         );
-        const existingAmount = myExistingBacking ? Number(myExistingBacking.amount_sol) : 0;
-        const totalAfterBacking = existingAmount + amountSol;
+        if (myExistingBacking) {
+          setBackingStatus(
+            `Error: You already have an active backing of ${Number(myExistingBacking.amount_sol).toFixed(2)} SOL. Withdraw first to change your amount.`
+          );
+          return;
+        }
 
-        if (totalAfterBacking > maxBackingPerWallet) {
-          const remainingAllowance = Math.max(0, maxBackingPerWallet - existingAmount);
-          if (remainingAllowance <= 0) {
-            setBackingStatus(
-              `Error: You've reached the max backing limit of ${maxBackingPerWallet.toFixed(2)} SOL per wallet.`
-            );
-          } else {
-            setBackingStatus(
-              `Error: Max ${maxBackingPerWallet.toFixed(2)} SOL per wallet. You can only back ${remainingAllowance.toFixed(2)} more SOL.`
-            );
-          }
+        // Check max backing limit (20% of goal)
+        const maxBackingPerWallet = Number(meme.backing_goal_sol) * 0.2;
+        if (amountSol > maxBackingPerWallet) {
+          setBackingStatus(
+            `Error: Maximum backing is ${maxBackingPerWallet.toFixed(2)} SOL per wallet (20% of goal).`
+          );
           return;
         }
       }
@@ -217,9 +313,10 @@ export default function MemeDetailPage() {
       // Show confirmation dialog before backing
       setBackingStatus(null); // Clear any previous errors
       setShowBackConfirm(true);
-    } else {
-      // TODO: Implement buy/sell for launched tokens
-      alert(`${tradeType === 'buy' ? 'Buying' : 'Selling'} ${amount} (Coming soon)`);
+    } else if (meme?.status === 'live') {
+      // Buy/sell for launched tokens - direct users to trade on pump.fun
+      const pumpUrl = meme.pump_fun_url || `https://pump.fun/coin/${meme.mint_address}`;
+      window.open(pumpUrl, '_blank', 'noopener,noreferrer');
     }
   };
 
@@ -325,6 +422,73 @@ export default function MemeDetailPage() {
     }
   };
 
+  const handleSweep = async (action: 'sell' | 'transfer') => {
+    if (!meme || !publicKey || sweeping) return;
+
+    setSweeping(true);
+    setSweepStatus(action === 'sell' ? 'Selling tokens...' : 'Transferring tokens...');
+
+    try {
+      const response = await fetch('/api/sweep', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          meme_id: meme.id,
+          backer_wallet: publicKey.toBase58(),
+          action,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || 'Sweep failed');
+      }
+
+      setSweepStatus(data.message);
+
+      // Update burner info to show swept status
+      setBurnerInfo(prev => prev ? { ...prev, swept: true, sweep_action: action } : null);
+
+      // Clear status after a moment
+      setTimeout(() => setSweepStatus(null), 5000);
+    } catch (err) {
+      console.error('Sweep failed:', err);
+      setSweepStatus(`Error: ${err instanceof Error ? err.message : 'Sweep failed'}`);
+    } finally {
+      setSweeping(false);
+    }
+  };
+
+  const handleExportPrivateKey = async () => {
+    if (!meme || !publicKey) return;
+
+    setShowExportKey(true);
+    setExportedKey(null); // Reset
+
+    try {
+      const response = await fetch('/api/backings/export-key', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          meme_id: meme.id,
+          backer_wallet: publicKey.toBase58(),
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to export key');
+      }
+
+      setExportedKey(data.private_key);
+    } catch (err) {
+      console.error('Export key error:', err);
+      // Keep modal open but show error state
+    }
+  };
+
   // Loading state
   if (loading) {
     return (
@@ -365,7 +529,6 @@ export default function MemeDetailPage() {
     creator_fee_pct = 2,
     backer_share_pct = 70,
     dev_initial_buy_sol = 0,
-    auto_refund = true,
     // Socials
     twitter,
     telegram,
@@ -378,14 +541,11 @@ export default function MemeDetailPage() {
     creator_fee_pct,
     backer_share_pct,
     dev_initial_buy_sol,
-    auto_refund,
     backing_goal_sol: Number(backing_goal_sol),
     duration: Math.ceil((new Date(backing_deadline).getTime() - new Date(meme.created_at).getTime()) / (1000 * 60 * 60 * 24)),
   });
 
   const progress = (Number(current_backing_sol) / Number(backing_goal_sol)) * 100;
-  const minBackers = 30; // From contract constants
-  const backerProgress = (backer_count / minBackers) * 100;
   const timeRemaining = getTimeRemaining(backing_deadline);
   const { label: statusLabel, class: statusClass } = getStatusConfig(status);
 
@@ -393,8 +553,14 @@ export default function MemeDetailPage() {
   const isFunded = status === 'funded';
   const isLaunching = status === 'launching';
   const isLaunched = status === 'live';
-  const maxBacking = Number(backing_goal_sol) * 0.1;
+  const maxBacking = Number(backing_goal_sol) * 0.2; // 20% for testing
   const isCreator = connected && publicKey?.toBase58() === creator_wallet;
+  const isBacker = connected && backings.some(
+    (b) => b.backer_wallet === publicKey?.toBase58() && b.status === 'distributed'
+  );
+
+  // Backing is currently paused for maintenance
+  const backingPaused = false;
 
   return (
     <div className="max-w-4xl mx-auto space-y-6">
@@ -505,6 +671,32 @@ export default function MemeDetailPage() {
             </button>
           </div>
         </div>
+
+        {/* Contract Address - shown for live tokens */}
+        {isLaunched && meme.mint_address && (
+          <div className="mt-4 pt-4 border-t border-[var(--border)]">
+            <div className="flex items-center gap-2 text-sm mb-2">
+              <Coins className="w-4 h-4 text-[var(--accent)]" />
+              <span className="text-[var(--muted)]">Contract Address (CA):</span>
+            </div>
+            <button
+              onClick={() => handleCopy(meme.mint_address!)}
+              className="w-full flex items-center gap-3 px-4 py-3 bg-[var(--background)] hover:bg-[var(--border)] border border-[var(--border)] rounded-lg transition-colors group"
+            >
+              <code className="flex-1 text-sm font-mono text-left break-all text-[var(--foreground)]">
+                {meme.mint_address}
+              </code>
+              {copied ? (
+                <Check className="w-5 h-5 text-[var(--success)] flex-shrink-0" />
+              ) : (
+                <Copy className="w-5 h-5 text-[var(--muted)] group-hover:text-[var(--accent)] flex-shrink-0" />
+              )}
+            </button>
+            <p className="text-xs text-[var(--muted)] mt-2">
+              Copy and paste into your favorite DEX to trade
+            </p>
+          </div>
+        )}
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -584,25 +776,48 @@ export default function MemeDetailPage() {
                 </div>
               </div>
 
-              {/* Backers Progress */}
-              <div>
-                <div className="flex justify-between text-sm mb-2">
-                  <span className="flex items-center gap-2 text-[var(--muted)]">
-                    <Users className="w-4 h-4" /> Backers
-                  </span>
-                  <span className="font-medium">
-                    {backer_count} / {minBackers} ({backerProgress.toFixed(1)}%)
-                  </span>
-                </div>
-                <div className="progress-bar h-4">
-                  <div className="progress-fill" style={{ width: `${Math.min(backerProgress, 100)}%` }} />
-                </div>
+              {/* Backers Count */}
+              <div className="flex items-center gap-2 text-sm text-[var(--muted)]">
+                <Users className="w-4 h-4" />
+                <span>{backer_count} backer{backer_count !== 1 ? 's' : ''}</span>
               </div>
 
               {/* Time Remaining */}
               <div className="flex items-center justify-center gap-2 text-lg text-[var(--warning)]">
                 <Clock className="w-5 h-5" />
                 <span>{timeRemaining} remaining</span>
+              </div>
+
+              {/* Fee Distribution Preview */}
+              <div className="border-t border-[var(--border)] pt-4">
+                <div className="flex items-center gap-2 mb-3">
+                  <Coins className="w-4 h-4 text-[var(--accent)]" />
+                  <span className="text-sm font-medium">Trading Fee Distribution</span>
+                  <div className="group relative">
+                    <Info className="w-4 h-4 text-[var(--muted)] cursor-help" />
+                    <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-64 p-3 bg-[var(--card)] border border-[var(--border)] rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 text-xs">
+                      <p className="text-[var(--muted)] mb-2">
+                        When this token launches and trades on pump.fun, 0.5% of all trading volume flows as creator fees.
+                      </p>
+                      <p className="text-[var(--muted)]">
+                        These fees are distributed 100% to backers and creator - no platform cut!
+                      </p>
+                    </div>
+                  </div>
+                </div>
+                <div className="space-y-2 text-sm">
+                  <div className="flex justify-between items-center p-2 bg-[var(--background)] rounded">
+                    <span className="text-[var(--muted)]">Creator receives</span>
+                    <span className="font-medium text-[var(--accent)]">{creator_fee_pct}%</span>
+                  </div>
+                  <div className="flex justify-between items-center p-2 bg-[var(--background)] rounded">
+                    <span className="text-[var(--muted)]">Backers split</span>
+                    <span className="font-medium text-[var(--success)]">{100 - creator_fee_pct}%</span>
+                  </div>
+                </div>
+                <p className="text-xs text-[var(--muted)] mt-2">
+                  Fee share is proportional to your backing amount
+                </p>
               </div>
             </div>
           )}
@@ -631,6 +846,133 @@ export default function MemeDetailPage() {
             </div>
           )}
 
+          {/* Token Wallet Actions - shown to backers after launch */}
+          {isLaunched && connected && burnerInfo && burnerInfo.burner_wallet && !burnerInfo.swept && (
+            <div className="card p-6">
+              <div className="flex items-center gap-3 mb-4">
+                <div className="w-10 h-10 rounded-full bg-[var(--accent)]/20 flex items-center justify-center">
+                  <Key className="w-5 h-5 text-[var(--accent)]" />
+                </div>
+                <div>
+                  <h2 className="text-lg font-semibold">Your Tokens</h2>
+                  <p className="text-sm text-[var(--muted)]">Claim tokens from your token wallet</p>
+                </div>
+              </div>
+
+              <div className="bg-[var(--background)] rounded-lg p-4 mb-4">
+                <p className="text-sm text-[var(--muted)] mb-1">Token Wallet:</p>
+                <code className="text-xs break-all">{burnerInfo.burner_wallet}</code>
+                {burnerInfo.amount_sol && (
+                  <p className="text-sm mt-2">
+                    <span className="text-[var(--muted)]">Backed:</span>{' '}
+                    <span className="font-medium">{Number(burnerInfo.amount_sol).toFixed(2)} SOL</span>
+                  </p>
+                )}
+              </div>
+
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => handleSweep('transfer')}
+                    disabled={sweeping}
+                    className="flex-1 flex items-center justify-center gap-3 p-4 bg-[var(--success)]/10 hover:bg-[var(--success)]/20 border border-[var(--success)]/30 rounded-lg transition-colors disabled:opacity-50"
+                  >
+                    <ArrowUpRight className="w-6 h-6 text-[var(--success)]" />
+                    <div className="text-left">
+                      <span className="font-medium block">Claim Tokens</span>
+                      <span className="text-xs text-[var(--muted)]">Transfer to your main wallet</span>
+                    </div>
+                  </button>
+                  <div className="group relative">
+                    <div className="p-3 bg-[var(--background)] hover:bg-[var(--border)] border border-[var(--border)] rounded-lg cursor-help transition-colors">
+                      <Info className="w-5 h-5 text-[var(--muted)]" />
+                    </div>
+                    <div className="absolute bottom-full right-0 mb-2 w-72 p-4 bg-[var(--card)] border border-[var(--border)] rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
+                      <p className="text-sm text-[var(--foreground)] mb-2 font-medium">After claiming tokens:</p>
+                      <p className="text-xs text-[var(--muted)] mb-3">
+                        Your tokens may not appear in Phantom or Solflare at first - this is normal for new tokens!
+                      </p>
+                      <p className="text-sm text-[var(--foreground)] mb-2 font-medium">To sell your tokens:</p>
+                      <ol className="text-xs text-[var(--muted)] space-y-1 list-decimal list-inside">
+                        <li>Go to pump.fun and connect your wallet</li>
+                        <li>Search for this token or use the trade link below</li>
+                        <li>Your tokens will appear there - sell from pump.fun</li>
+                      </ol>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="relative">
+                  <div className="absolute inset-0 flex items-center">
+                    <div className="w-full border-t border-[var(--border)]"></div>
+                  </div>
+                  <div className="relative flex justify-center text-xs">
+                    <span className="px-2 bg-[var(--card)] text-[var(--muted)]">or</span>
+                  </div>
+                </div>
+
+                <button
+                  onClick={handleExportPrivateKey}
+                  className="w-full flex items-center justify-center gap-2 p-3 bg-[var(--background)] hover:bg-[var(--border)] border border-[var(--border)] rounded-lg transition-colors text-sm"
+                >
+                  <Key className="w-4 h-4" />
+                  <span>Export Private Key</span>
+                </button>
+              </div>
+
+              {/* Sweep status message */}
+              {sweepStatus && (
+                <div className={`mt-4 p-3 rounded-lg text-sm text-center ${
+                  sweepStatus.includes('Error')
+                    ? 'bg-[var(--error)]/20 text-[var(--error)]'
+                    : sweepStatus.includes('Sold') || sweepStatus.includes('Transferred')
+                    ? 'bg-[var(--success)]/20 text-[var(--success)]'
+                    : 'bg-[var(--accent)]/20 text-[var(--accent)]'
+                }`}>
+                  {sweeping && <Loader2 className="w-4 h-4 animate-spin inline mr-2" />}
+                  {sweepStatus}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Already swept message */}
+          {isLaunched && connected && burnerInfo && burnerInfo.swept && (
+            <div className="card p-6">
+              <div className="flex items-center gap-3 mb-4">
+                <div className="w-10 h-10 rounded-full bg-[var(--success)]/20 flex items-center justify-center">
+                  <Check className="w-5 h-5 text-[var(--success)]" />
+                </div>
+                <div>
+                  <h2 className="text-lg font-semibold">Tokens Claimed</h2>
+                  <p className="text-sm text-[var(--muted)]">
+                    {burnerInfo.sweep_action === 'sell'
+                      ? 'You sold your tokens for SOL'
+                      : 'Tokens transferred to your main wallet'}
+                  </p>
+                </div>
+              </div>
+              <a
+                href={meme.pump_fun_url || `https://pump.fun/coin/${meme.mint_address}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="w-full flex items-center justify-center gap-2 p-3 bg-[var(--accent)] hover:bg-[var(--accent)]/90 text-white rounded-lg transition-colors font-medium"
+              >
+                <ExternalLink className="w-4 h-4" />
+                Trade on pump.fun
+              </a>
+            </div>
+          )}
+
+          {/* Claim Rewards - shown for live tokens to creators/backers */}
+          {isLaunched && (isCreator || isBacker) && (
+            <ClaimRewards
+              memeId={meme.id}
+              isCreator={isCreator}
+              isBacker={isBacker}
+            />
+          )}
+
           {/* Trust Score */}
           <TrustScoreDisplay breakdown={trustScoreBreakdown} />
 
@@ -640,11 +982,11 @@ export default function MemeDetailPage() {
             <ul className="space-y-2 text-sm text-[var(--muted)]">
               <li className="flex items-start gap-2">
                 <span className="text-[var(--accent)]">•</span>
-                Maximum backing per wallet: {maxBacking.toFixed(1)} SOL (10% of goal)
+                Maximum backing per wallet: {maxBacking.toFixed(1)} SOL (20% of goal)
               </li>
               <li className="flex items-start gap-2">
                 <span className="text-[var(--accent)]">•</span>
-                Minimum backing for fee eligibility: 0.5 SOL
+                Fee share is proportional to backing amount
               </li>
               <li className="flex items-start gap-2">
                 <span className="text-[var(--accent)]">•</span>
@@ -661,10 +1003,8 @@ export default function MemeDetailPage() {
                 </li>
               )}
               <li className="flex items-start gap-2">
-                <span className={auto_refund ? 'text-[var(--success)]' : 'text-[var(--warning)]'}>•</span>
-                {auto_refund
-                  ? 'If goal not reached, automatic refund to all backers'
-                  : 'Manual refunds if goal not reached'}
+                <span className="text-[var(--success)]">•</span>
+                If goal not reached, automatic refund to all backers
               </li>
               <li className="flex items-start gap-2">
                 <span className="text-[var(--warning)]">•</span>
@@ -684,34 +1024,111 @@ export default function MemeDetailPage() {
             <div className="text-center py-8 text-[var(--muted)]">
               Connect wallet to {isProving ? 'back' : 'trade'}
             </div>
-          ) : (
-            <>
-              {isLaunched && (
-                <div className="flex gap-2 mb-4">
+          ) : isLaunched ? (
+            /* Trading options for launched tokens */
+            <div className="space-y-4">
+              {burnerInfo && burnerInfo.burner_wallet && !burnerInfo.swept ? (
+                /* Backer has tokens to claim */
+                <>
+                  <div className="bg-[var(--background)] rounded-lg p-4">
+                    <p className="text-sm text-[var(--muted)] mb-1">Your token wallet:</p>
+                    <code className="text-xs break-all">{burnerInfo.burner_wallet}</code>
+                    {burnerInfo.amount_sol && (
+                      <p className="text-sm mt-2 font-medium">
+                        {Number(burnerInfo.amount_sol).toFixed(2)} SOL backed
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => handleSweep('transfer')}
+                      disabled={sweeping}
+                      className="flex-1 flex items-center justify-center gap-2 p-3 bg-[var(--success)] hover:bg-[var(--success)]/90 text-white rounded-lg transition-colors disabled:opacity-50"
+                    >
+                      {sweeping ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <ArrowUpRight className="w-4 h-4" />
+                      )}
+                      <span className="font-medium">Claim Tokens</span>
+                    </button>
+                    <div className="group relative">
+                      <div className="p-3 bg-[var(--background)] hover:bg-[var(--border)] border border-[var(--border)] rounded-lg cursor-help transition-colors">
+                        <Info className="w-4 h-4 text-[var(--muted)]" />
+                      </div>
+                      <div className="absolute bottom-full right-0 mb-2 w-64 p-3 bg-[var(--card)] border border-[var(--border)] rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
+                        <p className="text-xs text-[var(--muted)] mb-2">
+                          Tokens may not show in Phantom/Solflare at first - this is normal!
+                        </p>
+                        <p className="text-xs text-[var(--muted)]">
+                          Go to pump.fun to sell your tokens after claiming.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {sweepStatus && (
+                    <div className={`p-3 rounded-lg text-sm text-center ${
+                      sweepStatus.includes('Error')
+                        ? 'bg-[var(--error)]/20 text-[var(--error)]'
+                        : sweepStatus.includes('Sold') || sweepStatus.includes('Transferred')
+                        ? 'bg-[var(--success)]/20 text-[var(--success)]'
+                        : 'bg-[var(--accent)]/20 text-[var(--accent)]'
+                    }`}>
+                      {sweeping && <Loader2 className="w-4 h-4 animate-spin inline mr-2" />}
+                      {sweepStatus}
+                    </div>
+                  )}
+
                   <button
-                    onClick={() => setTradeType('buy')}
-                    className={`flex-1 py-2 rounded-lg font-medium transition-colors ${
-                      tradeType === 'buy'
-                        ? 'bg-[var(--success)] text-white'
-                        : 'bg-[var(--background)] text-[var(--muted)]'
-                    }`}
+                    onClick={handleExportPrivateKey}
+                    className="w-full flex items-center justify-center gap-2 p-3 bg-[var(--background)] hover:bg-[var(--border)] border border-[var(--border)] rounded-lg transition-colors text-sm"
                   >
-                    <ArrowUpRight className="w-4 h-4 inline mr-1" />
-                    Buy
+                    <Key className="w-4 h-4" />
+                    Export Private Key
                   </button>
-                  <button
-                    onClick={() => setTradeType('sell')}
-                    className={`flex-1 py-2 rounded-lg font-medium transition-colors ${
-                      tradeType === 'sell'
-                        ? 'bg-[var(--error)] text-white'
-                        : 'bg-[var(--background)] text-[var(--muted)]'
-                    }`}
+                </>
+              ) : burnerInfo?.swept ? (
+                /* Tokens already claimed */
+                <div className="space-y-3">
+                  <div className="text-center py-2">
+                    <Check className="w-8 h-8 mx-auto mb-2 text-[var(--success)]" />
+                    <p className="text-sm text-[var(--muted)]">
+                      Tokens claimed!
+                    </p>
+                  </div>
+                  <a
+                    href={meme.pump_fun_url || `https://pump.fun/coin/${meme.mint_address}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="w-full flex items-center justify-center gap-2 p-3 bg-[var(--accent)] hover:bg-[var(--accent)]/90 text-white rounded-lg transition-colors font-medium"
                   >
-                    <ArrowDownRight className="w-4 h-4 inline mr-1" />
-                    Sell
-                  </button>
+                    <ExternalLink className="w-4 h-4" />
+                    Trade on pump.fun
+                  </a>
+                </div>
+              ) : (
+                /* Not a backer - show trade on pump.fun */
+                <div className="text-center py-4">
+                  <p className="text-sm text-[var(--muted)] mb-4">
+                    Trade this token on pump.fun
+                  </p>
+                  <a
+                    href={meme.pump_fun_url || `https://pump.fun/coin/${meme.mint_address}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-2 px-4 py-2 bg-[var(--accent)] text-white rounded-lg hover:opacity-90"
+                  >
+                    <ExternalLink className="w-4 h-4" />
+                    Trade on pump.fun
+                  </a>
                 </div>
               )}
+            </div>
+          ) : (
+            /* Backing panel for proving tokens */
+            <>
 
               <div className="space-y-4">
                 <div>
@@ -751,6 +1168,32 @@ export default function MemeDetailPage() {
                   </div>
                 </div>
 
+                {/* Fee breakdown for backing */}
+                {isProving && amount && Number(amount) > 0 && (
+                  <div className="bg-[var(--background)] rounded-lg p-3 space-y-2">
+                    <div className="flex justify-between text-sm">
+                      <span className="text-[var(--muted)]">Backing amount</span>
+                      <span className="font-medium">{Number(amount).toFixed(4)} SOL</span>
+                    </div>
+                    <div className="flex justify-between text-sm">
+                      <div className="flex items-center gap-1">
+                        <span className="text-[var(--muted)]">Platform fee (2%)</span>
+                        <div className="group relative">
+                          <Info className="w-3 h-3 text-[var(--muted)] cursor-help" />
+                          <div className="absolute bottom-full left-0 mb-2 w-48 p-2 bg-[var(--card)] border border-[var(--border)] rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 text-xs">
+                            This fee supports the platform and is sent to the escrow wallet.
+                          </div>
+                        </div>
+                      </div>
+                      <span>{(Number(amount) * 0.02).toFixed(4)} SOL</span>
+                    </div>
+                    <div className="border-t border-[var(--border)] pt-2 flex justify-between text-sm font-medium">
+                      <span>Total</span>
+                      <span className="text-[var(--accent)]">{(Number(amount) * 1.02).toFixed(4)} SOL</span>
+                    </div>
+                  </div>
+                )}
+
                 {isLaunched && amount && (
                   <div className="bg-[var(--background)] rounded-lg p-3">
                     <div className="flex justify-between text-sm">
@@ -766,7 +1209,7 @@ export default function MemeDetailPage() {
 
                 <button
                   onClick={handleTrade}
-                  disabled={!amount || Number(amount) <= 0 || backing}
+                  disabled={!amount || Number(amount) <= 0 || backing || (isProving && backingPaused)}
                   className={`w-full py-3 rounded-lg font-semibold transition-all ${
                     isProving
                       ? 'btn-primary'
@@ -780,6 +1223,8 @@ export default function MemeDetailPage() {
                       <Loader2 className="w-4 h-4 animate-spin" />
                       Processing...
                     </span>
+                  ) : isProving && backingPaused ? (
+                    'Backing Paused'
                   ) : (
                     isProving ? 'Back Meme' : tradeType === 'buy' ? 'Buy Tokens' : 'Sell Tokens'
                   )}
@@ -805,7 +1250,7 @@ export default function MemeDetailPage() {
           {isProving && (
             <div className="mt-4 p-3 bg-[var(--accent)]/10 rounded-lg">
               <p className="text-xs text-[var(--muted)]">
-                Back 0.5+ SOL to qualify for genesis fee share ({backer_share_pct}% of trading fees)
+                Backers share {backer_share_pct}% of trading fees proportional to their backing amount
               </p>
             </div>
           )}
@@ -835,11 +1280,138 @@ export default function MemeDetailPage() {
         onClose={() => setShowBackConfirm(false)}
         onConfirm={confirmBack}
         title="Confirm Backing"
-        message={`You are about to send ${amount} SOL to back ${name}. This will be held in escrow until the token launches or you withdraw.`}
+        message={`You are about to send ${amount} SOL to back ${name}.\n\nA token wallet will be created for you. When the token launches, this wallet will automatically buy tokens on your behalf - making your purchase look organic on-chain.\n\nAfter launch, you'll be able to:\n• Sell tokens instantly for SOL\n• Transfer tokens to your main wallet\n• Export the private key to manage yourself`}
         confirmText={`Back ${amount} SOL`}
         variant="info"
         isLoading={backing}
       />
+
+      {/* Token Wallet Info Modal - shows after backing, hides private key until launch */}
+      {showBurnerInfo && pendingBurnerKeypair && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+          <div className="bg-[var(--card)] border border-[var(--border)] rounded-2xl p-6 max-w-md w-full mx-4 shadow-xl">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 rounded-full bg-[var(--success)]/20 flex items-center justify-center">
+                <Key className="w-5 h-5 text-[var(--success)]" />
+              </div>
+              <div>
+                <h3 className="text-lg font-semibold">Backing Successful!</h3>
+                <p className="text-sm text-[var(--muted)]">Your token wallet is ready</p>
+              </div>
+            </div>
+
+            <div className="space-y-4">
+              <div className="bg-[var(--accent)]/10 border border-[var(--accent)]/30 rounded-lg p-4">
+                <p className="text-sm text-[var(--accent)] font-medium mb-2">What happens next:</p>
+                <ul className="text-xs text-[var(--muted)] space-y-1">
+                  <li>• Your SOL is now in a secure token wallet</li>
+                  <li>• When the token launches, it will automatically buy tokens</li>
+                  <li>• After launch, you can claim, transfer, or export your tokens</li>
+                  <li>• Your private key is encrypted and stored securely</li>
+                </ul>
+              </div>
+
+              <div className="bg-[var(--background)] rounded-lg p-4">
+                <div className="flex items-center gap-2 text-sm text-[var(--muted)]">
+                  <Key className="w-4 h-4" />
+                  <span className="font-medium">Wallet details hidden until launch</span>
+                </div>
+                <p className="text-xs text-[var(--muted)] mt-2">
+                  For security, your token wallet address and private key are hidden until launch. This prevents front-running and protects your position. After launch, you&apos;ll see your wallet and have options to claim, transfer, or export your tokens.
+                </p>
+              </div>
+
+              <div className="bg-[var(--warning)]/10 border border-[var(--warning)]/30 rounded-lg p-4">
+                <p className="text-sm text-[var(--warning)] font-medium mb-1">Changed your mind?</p>
+                <p className="text-xs text-[var(--muted)]">
+                  You can withdraw your backing anytime before launch for a 2% fee. Visit your Portfolio or use the withdraw button on this page.
+                </p>
+              </div>
+
+              <button
+                onClick={() => {
+                  setShowBurnerInfo(false);
+                  setPendingBurnerKeypair(null);
+                  setBackingStatus(null);
+                }}
+                className="w-full py-3 bg-[var(--accent)] text-white rounded-lg font-medium hover:opacity-90"
+              >
+                Got it!
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Export Private Key Modal (for launched tokens) */}
+      {showExportKey && burnerInfo && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+          <div className="bg-[var(--card)] border border-[var(--border)] rounded-2xl p-6 max-w-md w-full mx-4 shadow-xl">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 rounded-full bg-[var(--warning)]/20 flex items-center justify-center">
+                <Key className="w-5 h-5 text-[var(--warning)]" />
+              </div>
+              <div>
+                <h3 className="text-lg font-semibold">Export Private Key</h3>
+                <p className="text-sm text-[var(--muted)]">Import to your wallet</p>
+              </div>
+            </div>
+
+            <div className="space-y-4">
+              <div className="bg-[var(--warning)]/10 border border-[var(--warning)]/30 rounded-lg p-4">
+                <p className="text-sm text-[var(--warning)] font-medium mb-2">Security Notice:</p>
+                <ul className="text-xs text-[var(--muted)] space-y-1">
+                  <li>• Never share your private key with anyone</li>
+                  <li>• Only import to trusted wallet apps (Phantom, Solflare)</li>
+                  <li>• This gives full control of the token wallet</li>
+                </ul>
+              </div>
+
+              {exportedKey ? (
+                <div className="bg-[var(--background)] rounded-lg p-4">
+                  <p className="text-sm text-[var(--muted)] mb-2">Private Key:</p>
+                  <div className="flex gap-2">
+                    <code className="flex-1 text-xs break-all bg-[var(--card)] p-2 rounded border border-[var(--border)]">
+                      {exportKeyCopied ? '••••••••••••••••' : exportedKey}
+                    </code>
+                    <button
+                      onClick={() => {
+                        navigator.clipboard.writeText(exportedKey);
+                        setExportKeyCopied(true);
+                        setTimeout(() => setExportKeyCopied(false), 3000);
+                      }}
+                      className="px-3 py-2 bg-[var(--accent)] text-white rounded-lg text-sm hover:opacity-90"
+                    >
+                      {exportKeyCopied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="bg-[var(--background)] rounded-lg p-4 text-center">
+                  <Loader2 className="w-6 h-6 animate-spin mx-auto mb-3 text-[var(--accent)]" />
+                  <p className="text-sm text-[var(--muted)]">
+                    Loading private key...
+                  </p>
+                  <p className="text-xs text-[var(--muted)] mt-2">
+                    Burner wallet: <code className="text-xs">{burnerInfo.burner_wallet.slice(0, 8)}...{burnerInfo.burner_wallet.slice(-8)}</code>
+                  </p>
+                </div>
+              )}
+
+              <button
+                onClick={() => {
+                  setShowExportKey(false);
+                  setExportedKey(null);
+                  setExportKeyCopied(false);
+                }}
+                className="w-full py-3 bg-[var(--background)] hover:bg-[var(--border)] rounded-lg font-medium transition-colors"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <ConfirmDialog
         isOpen={showWithdrawConfirm}

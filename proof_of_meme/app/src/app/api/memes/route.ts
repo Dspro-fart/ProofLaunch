@@ -42,7 +42,7 @@ export async function GET(request: NextRequest) {
 }
 
 // Required creation fee in SOL
-const CREATION_FEE_SOL = 0.01;
+const CREATION_FEE_SOL = 0.02; // Goes to escrow to cover launch costs
 
 // POST /api/memes - Submit a new meme
 export async function POST(request: NextRequest) {
@@ -66,17 +66,23 @@ export async function POST(request: NextRequest) {
       creator_fee_pct = 2,
       backer_share_pct = 70,
       dev_initial_buy_sol = 0,
-      auto_refund = true,
       trust_score = 75,
-      // Creation fee payment
+      // Creation fee payment (goes to escrow for platform costs)
       creation_fee_signature,
       creation_fee_sol,
     } = body;
 
     // Validation
     if (!creator_wallet || !name || !symbol || !description || !image_url) {
+      const missing = [];
+      if (!creator_wallet) missing.push('creator_wallet');
+      if (!name) missing.push('name');
+      if (!symbol) missing.push('symbol');
+      if (!description) missing.push('description');
+      if (!image_url) missing.push('image_url');
+      console.log('Missing fields:', missing, 'Body:', JSON.stringify(body).slice(0, 500));
       return NextResponse.json(
-        { error: 'Missing required fields' },
+        { error: `Missing required fields: ${missing.join(', ')}` },
         { status: 400 }
       );
     }
@@ -96,9 +102,9 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    if (!backing_goal_sol || backing_goal_sol < 1) {
+    if (!backing_goal_sol || backing_goal_sol < 0.1) {
       return NextResponse.json(
-        { error: 'Backing goal must be at least 1 SOL' },
+        { error: 'Backing goal must be at least 0.1 SOL' },
         { status: 400 }
       );
     }
@@ -140,12 +146,12 @@ export async function POST(request: NextRequest) {
         backing_deadline: deadline.toISOString(),
         status: 'backing', // Start in backing phase
         submission_fee_paid: true, // Fee paid via creation_fee_signature
-        current_backing_sol: creation_fee_sol, // Start with creation fee as initial backing
+        current_backing_sol: 0, // Starts at 0, backers add to this
         // Trust score parameters
         creator_fee_pct,
         backer_share_pct,
         dev_initial_buy_sol,
-        auto_refund,
+        auto_refund: true, // Always auto-refund on failure - no option to hold backer funds
         trust_score,
       })
       .select()
@@ -155,20 +161,9 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
 
-    // Record the creation fee as the creator's initial backing
-    const { error: backingError } = await supabase
-      .from('backings')
-      .insert({
-        meme_id: data.id,
-        backer_wallet: creator_wallet,
-        amount_sol: creation_fee_sol,
-        transaction_signature: creation_fee_signature,
-        status: 'confirmed',
-      });
-
-    if (backingError) {
-      console.error('Failed to record creation fee as backing:', backingError);
-    }
+    // Note: Creation fee goes to escrow, not recorded as a backing
+    // The creator's token wallet is stored on the meme itself, not as a backing record
+    // This prevents the creation fee from showing in portfolio as a "backing"
 
     // Update user's meme count
     await supabase.rpc('increment_memes_created', { wallet: creator_wallet });

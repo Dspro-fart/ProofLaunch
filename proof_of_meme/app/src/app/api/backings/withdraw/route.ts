@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createServerClient } from '@/lib/supabase';
-import { refundBacker, getEscrowBalance } from '@/services/pumpfun';
+import { refundFromBurnerWallet } from '@/services/pumpfun';
 import { rateLimiters } from '@/lib/rateLimit';
 
-// Withdrawal fee - stays in escrow to cover operational costs
+// Withdrawal fee - stays in burner wallet as dust
 const WITHDRAWAL_FEE_PERCENT = 2; // 2% fee on withdrawals
 
 // POST /api/backings/withdraw - Withdraw backing from a meme
@@ -78,28 +78,29 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const amountSol = Number(backing.amount_sol);
-
-    // Calculate withdrawal fee (stays in escrow for operational costs)
-    const withdrawalFee = amountSol * (WITHDRAWAL_FEE_PERCENT / 100);
-    const refundAmount = amountSol - withdrawalFee;
-
-    // Check escrow balance before attempting refund
-    const escrowBalance = await getEscrowBalance();
-    // Add buffer for transaction fees (0.01 SOL)
-    const requiredBalance = refundAmount + 0.01;
-
-    if (escrowBalance < requiredBalance) {
-      console.error(`Insufficient escrow balance: ${escrowBalance} SOL < ${requiredBalance} SOL required`);
+    // Check if this backing has a burner wallet (new flow)
+    if (!backing.burner_wallet || !backing.encrypted_private_key) {
       return NextResponse.json(
-        { error: 'Escrow has insufficient funds. Please contact support.' },
-        { status: 503 }
+        { error: 'This backing does not have a burner wallet. Please contact support.' },
+        { status: 400 }
       );
     }
 
-    // Process refund from escrow to backer (minus withdrawal fee)
-    console.log(`Processing withdrawal: ${amountSol} SOL - ${withdrawalFee.toFixed(4)} SOL fee = ${refundAmount.toFixed(4)} SOL to ${backer_wallet}`);
-    const refundResult = await refundBacker(backer_wallet, refundAmount);
+    const amountSol = Number(backing.amount_sol);
+
+    // Calculate expected withdrawal fee
+    const withdrawalFee = amountSol * (WITHDRAWAL_FEE_PERCENT / 100);
+    const expectedRefund = amountSol - withdrawalFee;
+
+    // Process refund from burner wallet to user's main wallet
+    console.log(`Processing withdrawal from burner wallet: ${amountSol} SOL - ${WITHDRAWAL_FEE_PERCENT}% fee to ${backer_wallet}`);
+    const refundResult = await refundFromBurnerWallet(
+      backing.encrypted_private_key,
+      backing.burner_wallet,
+      backer_wallet,
+      amountSol,
+      WITHDRAWAL_FEE_PERCENT
+    );
 
     if (!refundResult.success) {
       console.error('Refund failed:', refundResult.error);
@@ -108,6 +109,8 @@ export async function POST(request: NextRequest) {
         { status: 500 }
       );
     }
+
+    const refundAmount = refundResult.amountRefunded || expectedRefund;
 
     // Update backing status to withdrawn
     const { error: updateError } = await supabase
@@ -133,13 +136,16 @@ export async function POST(request: NextRequest) {
 
     console.log(`Withdrawal complete. New backing total: ${updatedMeme?.current_backing_sol} SOL`);
 
+    // Calculate actual fee based on what was refunded
+    const actualFee = amountSol - refundAmount;
+
     return NextResponse.json({
       success: true,
       original_amount: amountSol,
-      withdrawal_fee: withdrawalFee,
+      withdrawal_fee: actualFee,
       amount_refunded: refundAmount,
       refund_tx: refundResult.signature,
-      message: `Successfully withdrew ${refundAmount.toFixed(4)} SOL (${WITHDRAWAL_FEE_PERCENT}% fee: ${withdrawalFee.toFixed(4)} SOL)`,
+      message: `Successfully withdrew ${refundAmount.toFixed(4)} SOL (fee: ${actualFee.toFixed(4)} SOL)`,
     });
   } catch (error) {
     console.error('Withdrawal error:', error);

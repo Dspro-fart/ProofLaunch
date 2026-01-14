@@ -1,8 +1,8 @@
 'use client';
 
-import { FC } from 'react';
+import { FC, useState } from 'react';
 import Link from 'next/link';
-import { Users, Target, Clock, TrendingUp, Flame, ExternalLink, Shield } from 'lucide-react';
+import { Users, Target, Clock, TrendingUp, Flame, ExternalLink, Shield, Copy, Check } from 'lucide-react';
 import type { Meme } from '@/types/database';
 
 // Get trust score color based on value
@@ -51,6 +51,8 @@ function getStatusConfig(status: string) {
 }
 
 export const MemeCard: FC<MemeCardProps> = ({ meme }) => {
+  const [caCopied, setCaCopied] = useState(false);
+
   const {
     id,
     name,
@@ -63,9 +65,20 @@ export const MemeCard: FC<MemeCardProps> = ({ meme }) => {
     creator_wallet,
     image_url,
     pump_fun_url,
+    mint_address,
     backer_count = 0,
     trust_score = 75,
   } = meme;
+
+  const handleCopyCA = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (mint_address) {
+      navigator.clipboard.writeText(mint_address);
+      setCaCopied(true);
+      setTimeout(() => setCaCopied(false), 2000);
+    }
+  };
 
   const progress = (Number(current_backing_sol) / Number(backing_goal_sol)) * 100;
   const timeRemaining = getTimeRemaining(backing_deadline);
@@ -140,22 +153,42 @@ export const MemeCard: FC<MemeCardProps> = ({ meme }) => {
 
         {/* Stats for live tokens */}
         {status === 'live' && (
-          <div className="flex items-center gap-4 mb-4">
-            <div className="flex items-center gap-1 text-sm">
-              <TrendingUp className="w-4 h-4 text-[var(--success)]" />
-              <span className="text-[var(--success)]">Live on Pump.fun</span>
+          <div className="space-y-3 mb-4">
+            <div className="flex items-center gap-4">
+              <div className="flex items-center gap-1 text-sm">
+                <TrendingUp className="w-4 h-4 text-[var(--success)]" />
+                <span className="text-[var(--success)]">Live on Pump.fun</span>
+              </div>
+              {pump_fun_url && (
+                <span
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    window.open(pump_fun_url, '_blank', 'noopener,noreferrer');
+                  }}
+                  className="flex items-center gap-1 text-sm text-[var(--accent)] hover:underline cursor-pointer"
+                >
+                  <ExternalLink className="w-3 h-3" />
+                  Trade
+                </span>
+              )}
             </div>
-            {pump_fun_url && (
-              <a
-                href={pump_fun_url}
-                target="_blank"
-                rel="noopener noreferrer"
-                onClick={(e) => e.stopPropagation()}
-                className="flex items-center gap-1 text-sm text-[var(--accent)] hover:underline"
+            {/* Copyable CA */}
+            {mint_address && (
+              <button
+                onClick={handleCopyCA}
+                className="w-full flex items-center gap-2 px-3 py-2 bg-[var(--background)] hover:bg-[var(--border)] rounded-lg transition-colors group/ca"
               >
-                <ExternalLink className="w-3 h-3" />
-                Trade
-              </a>
+                <span className="text-xs text-[var(--muted)]">CA:</span>
+                <code className="flex-1 text-xs font-mono truncate text-[var(--foreground)]">
+                  {mint_address}
+                </code>
+                {caCopied ? (
+                  <Check className="w-4 h-4 text-[var(--success)] flex-shrink-0" />
+                ) : (
+                  <Copy className="w-4 h-4 text-[var(--muted)] group-hover/ca:text-[var(--accent)] flex-shrink-0" />
+                )}
+              </button>
             )}
           </div>
         )}

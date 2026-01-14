@@ -48,15 +48,16 @@ export const MemeChat: FC<MemeChatProps> = ({ memeId }) => {
     return () => clearInterval(interval);
   }, [fetchMessages]);
 
-  // Scroll to bottom only when NEW messages arrive (not on every poll)
-  const prevMessageCount = useRef(messages.length);
-  useEffect(() => {
-    // Only scroll if message count increased (new message added)
-    if (messages.length > prevMessageCount.current) {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  // Scroll within chat container only when user sends a new message
+  // Don't auto-scroll on load or when other users send messages
+  const scrollToBottom = useCallback(() => {
+    if (messagesEndRef.current) {
+      const container = messagesEndRef.current.parentElement;
+      if (container) {
+        container.scrollTop = container.scrollHeight;
+      }
     }
-    prevMessageCount.current = messages.length;
-  }, [messages.length]);
+  }, []);
 
   // Send message
   const handleSend = async () => {
@@ -78,6 +79,8 @@ export const MemeChat: FC<MemeChatProps> = ({ memeId }) => {
         setNewMessage('');
         // Immediately fetch to show the new message
         await fetchMessages();
+        // Scroll to bottom after sending own message
+        scrollToBottom();
       } else {
         const data = await response.json();
         console.error('Failed to send:', data.error);

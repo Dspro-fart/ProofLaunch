@@ -3,16 +3,19 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useWallet } from '@solana/wallet-adapter-react';
 import Link from 'next/link';
-import { Coins, TrendingUp, Clock, Gift, AlertCircle, Loader2, ExternalLink, RefreshCw } from 'lucide-react';
+import { Coins, TrendingUp, Clock, Gift, AlertCircle, Loader2, ExternalLink, RefreshCw, Key, Copy, Check, Eye, EyeOff, Sparkles, Users } from 'lucide-react';
+import { PortfolioRewards } from '@/components/PortfolioRewards';
 
 interface BackingWithMeme {
   id: string;
   meme_id: string;
   amount_sol: number;
-  status: 'pending' | 'confirmed' | 'refunded' | 'distributed';
+  status: 'pending' | 'confirmed' | 'refunded' | 'distributed' | 'withdrawn';
   deposit_tx?: string;
   refund_tx?: string;
   created_at: string;
+  burner_wallet?: string;
+  encrypted_private_key?: string;
   memes: {
     id: string;
     name: string;
@@ -26,6 +29,21 @@ interface BackingWithMeme {
     pump_fun_url?: string;
     trust_score?: number;
   };
+}
+
+interface CreatedMeme {
+  id: string;
+  name: string;
+  symbol: string;
+  image_url: string;
+  status: string;
+  backing_goal_sol: number;
+  current_backing_sol: number;
+  backing_deadline: string;
+  mint_address?: string;
+  pump_fun_url?: string;
+  backer_count?: number;
+  created_at: string;
 }
 
 function getTimeRemaining(deadline: string): string {
@@ -64,21 +82,89 @@ function getStatusBadge(status: string) {
 export default function PortfolioPage() {
   const { connected, publicKey } = useWallet();
   const [backings, setBackings] = useState<BackingWithMeme[]>([]);
+  const [createdMemes, setCreatedMemes] = useState<CreatedMeme[]>([]);
   const [loading, setLoading] = useState(true);
   const [requesting, setRequesting] = useState<string | null>(null);
+  const [revealedKeys, setRevealedKeys] = useState<Map<string, string>>(new Map());
+  const [loadingKeys, setLoadingKeys] = useState<Set<string>>(new Set());
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
-  const fetchBackings = useCallback(async () => {
+  const toggleRevealKey = async (backing: BackingWithMeme) => {
+    const backingId = backing.id;
+
+    // If already revealed, hide it
+    if (revealedKeys.has(backingId)) {
+      setRevealedKeys(prev => {
+        const newMap = new Map(prev);
+        newMap.delete(backingId);
+        return newMap;
+      });
+      return;
+    }
+
+    // Fetch the private key from the secure API
+    setLoadingKeys(prev => new Set(prev).add(backingId));
+    try {
+      const response = await fetch('/api/backings/export-key', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          meme_id: backing.meme_id,
+          backer_wallet: publicKey?.toBase58(),
+        }),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        setRevealedKeys(prev => {
+          const newMap = new Map(prev);
+          newMap.set(backingId, data.private_key);
+          return newMap;
+        });
+      } else {
+        const data = await response.json();
+        alert(`Cannot export key: ${data.error}`);
+      }
+    } catch (error) {
+      console.error('Failed to export key:', error);
+      alert('Failed to export private key');
+    } finally {
+      setLoadingKeys(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(backingId);
+        return newSet;
+      });
+    }
+  };
+
+  const copyToClipboard = async (text: string, backingId: string) => {
+    await navigator.clipboard.writeText(text);
+    setCopiedKey(backingId);
+    setTimeout(() => setCopiedKey(null), 2000);
+  };
+
+  const fetchPortfolio = useCallback(async () => {
     if (!publicKey) return;
 
     setLoading(true);
     try {
-      const response = await fetch(`/api/backings?backer=${publicKey.toBase58()}`);
-      if (response.ok) {
-        const data = await response.json();
+      // Fetch backings and created memes in parallel
+      const [backingsRes, memesRes] = await Promise.all([
+        fetch(`/api/backings?backer=${publicKey.toBase58()}`),
+        fetch(`/api/memes?creator=${publicKey.toBase58()}`),
+      ]);
+
+      if (backingsRes.ok) {
+        const data = await backingsRes.json();
         setBackings(data.backings || []);
       }
+
+      if (memesRes.ok) {
+        const data = await memesRes.json();
+        setCreatedMemes(data.memes || []);
+      }
     } catch (error) {
-      console.error('Failed to fetch backings:', error);
+      console.error('Failed to fetch portfolio:', error);
     } finally {
       setLoading(false);
     }
@@ -86,16 +172,28 @@ export default function PortfolioPage() {
 
   useEffect(() => {
     if (connected && publicKey) {
-      fetchBackings();
+      fetchPortfolio();
     }
-  }, [connected, publicKey, fetchBackings]);
+  }, [connected, publicKey, fetchPortfolio]);
 
-  const handleRequestRefund = async (backing: BackingWithMeme) => {
+  const handleWithdraw = async (backing: BackingWithMeme) => {
     if (!publicKey) return;
+
+    // Confirm withdrawal with fee warning
+    const feeAmount = (backing.amount_sol * 0.02).toFixed(4);
+    const refundAmount = (backing.amount_sol * 0.98).toFixed(4);
+    const confirmed = window.confirm(
+      `Withdraw your backing of ${backing.amount_sol.toFixed(2)} SOL?\n\n` +
+      `Withdrawal fee (2%): ${feeAmount} SOL\n` +
+      `You will receive: ${refundAmount} SOL\n\n` +
+      `This action cannot be undone.`
+    );
+
+    if (!confirmed) return;
 
     setRequesting(backing.id);
     try {
-      const response = await fetch('/api/refund', {
+      const response = await fetch('/api/backings/withdraw', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -104,16 +202,18 @@ export default function PortfolioPage() {
         }),
       });
 
+      const data = await response.json();
+
       if (response.ok) {
+        alert(`Withdrawal successful!\n\nReceived: ${data.amount_refunded?.toFixed(4) || refundAmount} SOL`);
         // Refresh backings
-        await fetchBackings();
+        await fetchPortfolio();
       } else {
-        const data = await response.json();
-        alert(`Refund failed: ${data.error}`);
+        alert(`Withdrawal failed: ${data.error}`);
       }
     } catch (error) {
-      console.error('Refund request failed:', error);
-      alert('Refund request failed');
+      console.error('Withdrawal request failed:', error);
+      alert('Withdrawal request failed');
     } finally {
       setRequesting(null);
     }
@@ -171,7 +271,7 @@ export default function PortfolioPage() {
           </p>
         </div>
         <button
-          onClick={fetchBackings}
+          onClick={fetchPortfolio}
           className="p-2 rounded-lg bg-[var(--card)] hover:bg-[var(--border)] transition-colors"
           title="Refresh"
         >
@@ -202,6 +302,9 @@ export default function PortfolioPage() {
           <div className="text-sm text-[var(--muted)]">Refunded</div>
         </div>
       </div>
+
+      {/* Trading Fee Rewards */}
+      <PortfolioRewards />
 
       {/* Backings List */}
       <div className="space-y-4">
@@ -293,9 +396,26 @@ export default function PortfolioPage() {
                       </div>
                     )}
 
+                    {/* Withdraw button for active backings during proving phase */}
+                    {isProving && backing.status === 'confirmed' && (
+                      <button
+                        onClick={() => handleWithdraw(backing)}
+                        disabled={requesting === backing.id}
+                        className="bg-[var(--border)] hover:bg-[var(--card)] text-[var(--foreground)] font-semibold py-2 px-4 rounded-lg flex items-center gap-2 disabled:opacity-50"
+                      >
+                        {requesting === backing.id ? (
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : (
+                          <RefreshCw className="w-4 h-4" />
+                        )}
+                        Withdraw
+                      </button>
+                    )}
+
+                    {/* Refund button for failed/expired backings */}
                     {canRefund && backing.status === 'confirmed' && (
                       <button
-                        onClick={() => handleRequestRefund(backing)}
+                        onClick={() => handleWithdraw(backing)}
                         disabled={requesting === backing.id}
                         className="bg-[var(--warning)] hover:bg-[var(--warning)]/80 text-black font-semibold py-2 px-4 rounded-lg flex items-center gap-2 disabled:opacity-50"
                       >
@@ -304,7 +424,7 @@ export default function PortfolioPage() {
                         ) : (
                           <RefreshCw className="w-4 h-4" />
                         )}
-                        Request Refund
+                        Claim Refund
                       </button>
                     )}
                   </div>
@@ -337,6 +457,206 @@ export default function PortfolioPage() {
                   <div className="mt-3 pt-3 border-t border-[var(--border)] flex items-center gap-2 text-sm text-[var(--success)]">
                     <Gift className="w-4 h-4" />
                     Qualifies for genesis fee share
+                  </div>
+                )}
+
+                {/* Token Wallet Info - only show after launch */}
+                {backing.burner_wallet && isLive && (
+                  <div className="mt-3 pt-3 border-t border-[var(--border)]">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2 text-sm text-[var(--muted)]">
+                        <Key className="w-4 h-4" />
+                        <span>Token Wallet: {backing.burner_wallet.slice(0, 8)}...{backing.burner_wallet.slice(-6)}</span>
+                      </div>
+                      <button
+                        onClick={() => toggleRevealKey(backing)}
+                        disabled={loadingKeys.has(backing.id)}
+                        className="text-sm text-[var(--accent)] hover:text-[var(--accent-hover)] flex items-center gap-1 disabled:opacity-50"
+                      >
+                        {loadingKeys.has(backing.id) ? (
+                          <>
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                            Loading...
+                          </>
+                        ) : revealedKeys.has(backing.id) ? (
+                          <>
+                            <EyeOff className="w-4 h-4" />
+                            Hide Key
+                          </>
+                        ) : (
+                          <>
+                            <Eye className="w-4 h-4" />
+                            Show Key
+                          </>
+                        )}
+                      </button>
+                    </div>
+                    {revealedKeys.has(backing.id) && (
+                      <div className="mt-2 p-3 bg-[var(--background)] rounded-lg">
+                        <div className="flex items-center justify-between gap-2">
+                          <code className="text-xs break-all text-[var(--warning)]">
+                            {revealedKeys.get(backing.id)}
+                          </code>
+                          <button
+                            onClick={() => copyToClipboard(revealedKeys.get(backing.id)!, backing.id)}
+                            className="flex-shrink-0 p-2 hover:bg-[var(--card)] rounded"
+                            title="Copy to clipboard"
+                          >
+                            {copiedKey === backing.id ? (
+                              <Check className="w-4 h-4 text-[var(--success)]" />
+                            ) : (
+                              <Copy className="w-4 h-4 text-[var(--muted)]" />
+                            )}
+                          </button>
+                        </div>
+                        <p className="text-xs text-[var(--muted)] mt-2">
+                          Import this key into Phantom to access your token wallet
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Token wallet placeholder - shown before launch */}
+                {!isLive && !isFailed && backing.status === 'confirmed' && (
+                  <div className="mt-3 pt-3 border-t border-[var(--border)]">
+                    <div className="flex items-center gap-2 text-sm text-[var(--muted)]">
+                      <Key className="w-4 h-4 opacity-50" />
+                      <span className="italic">Token wallet access available after launch</span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })
+        )}
+      </div>
+
+      {/* Your Creations Section */}
+      <div className="space-y-4">
+        <h2 className="text-xl font-semibold flex items-center gap-2">
+          <Sparkles className="w-5 h-5 text-[var(--accent)]" />
+          Your Creations
+        </h2>
+
+        {createdMemes.length === 0 ? (
+          <div className="card p-8 text-center">
+            <Sparkles className="w-12 h-12 mx-auto text-[var(--muted)] mb-4 opacity-50" />
+            <h3 className="text-lg font-semibold mb-2">No memes created yet</h3>
+            <p className="text-[var(--muted)] mb-4">
+              Submit your first meme to the Proving Grounds
+            </p>
+            <Link href="/submit" className="btn-primary inline-block">
+              Create Meme
+            </Link>
+          </div>
+        ) : (
+          createdMemes.map((meme) => {
+            const statusBadge = getStatusBadge(meme.status);
+            const isProving = meme.status === 'backing';
+            const isFunded = meme.status === 'funded';
+            const isLive = meme.status === 'live';
+            const progress = Number(meme.backing_goal_sol) > 0
+              ? (Number(meme.current_backing_sol) / Number(meme.backing_goal_sol)) * 100
+              : 0;
+
+            return (
+              <div key={meme.id} className="card p-5">
+                <div className="flex items-center justify-between">
+                  <Link
+                    href={`/meme/${meme.id}`}
+                    className="flex items-center gap-4 hover:opacity-80 transition-opacity"
+                  >
+                    {meme.image_url ? (
+                      <img
+                        src={meme.image_url}
+                        alt={meme.name}
+                        className="w-12 h-12 rounded-xl object-cover"
+                      />
+                    ) : (
+                      <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-[var(--gradient-start)] to-[var(--gradient-end)] flex items-center justify-center text-xl font-bold">
+                        {meme.symbol.charAt(0)}
+                      </div>
+                    )}
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <h3 className="font-semibold">{meme.name}</h3>
+                        <span className={`px-2 py-0.5 rounded-full text-xs ${statusBadge.class}`}>
+                          {statusBadge.label}
+                        </span>
+                      </div>
+                      <span className="text-sm text-[var(--muted)]">${meme.symbol}</span>
+                    </div>
+                  </Link>
+
+                  <div className="flex items-center gap-6">
+                    {/* Backing stats */}
+                    <div className="text-right">
+                      <div className="text-sm text-[var(--muted)]">Backing</div>
+                      <div className="font-semibold">
+                        {Number(meme.current_backing_sol).toFixed(2)} / {Number(meme.backing_goal_sol)} SOL
+                      </div>
+                    </div>
+
+                    {/* Backer count */}
+                    {meme.backer_count !== undefined && (
+                      <div className="text-right">
+                        <div className="text-sm text-[var(--muted)]">Backers</div>
+                        <div className="font-semibold flex items-center gap-1 justify-end">
+                          <Users className="w-4 h-4" />
+                          {meme.backer_count}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Time remaining for proving */}
+                    {isProving && (
+                      <div className="text-right">
+                        <div className="text-sm text-[var(--muted)]">Time Left</div>
+                        <div className="font-semibold text-[var(--warning)]">
+                          {getTimeRemaining(meme.backing_deadline)}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Launch button for funded memes */}
+                    {isFunded && (
+                      <Link
+                        href={`/meme/${meme.id}`}
+                        className="btn-primary flex items-center gap-2 py-2 px-4"
+                      >
+                        Ready to Launch
+                      </Link>
+                    )}
+
+                    {/* Trade link for live memes */}
+                    {isLive && meme.pump_fun_url && (
+                      <a
+                        href={meme.pump_fun_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="btn-primary flex items-center gap-2 py-2 px-4"
+                      >
+                        <ExternalLink className="w-4 h-4" />
+                        Trade
+                      </a>
+                    )}
+                  </div>
+                </div>
+
+                {/* Progress bar for proving/funded memes */}
+                {(isProving || isFunded) && (
+                  <div className="mt-4 pt-4 border-t border-[var(--border)]">
+                    <div className="flex justify-between text-sm mb-2">
+                      <span className="text-[var(--muted)]">Progress</span>
+                      <span>{progress.toFixed(1)}%</span>
+                    </div>
+                    <div className="h-2 bg-[var(--background)] rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-[var(--accent)] rounded-full transition-all"
+                        style={{ width: `${Math.min(progress, 100)}%` }}
+                      />
+                    </div>
                   </div>
                 )}
               </div>

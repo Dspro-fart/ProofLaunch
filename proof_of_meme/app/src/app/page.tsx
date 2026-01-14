@@ -2,13 +2,15 @@
 
 import { useState, useMemo } from 'react';
 import { MemeCard } from '@/components/MemeCard';
-import { Flame, TrendingUp, Users, Search, Loader2, Shield, ArrowUpDown, SlidersHorizontal, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Flame, TrendingUp, Users, Search, Loader2, Shield, ArrowUpDown, SlidersHorizontal, ChevronLeft, ChevronRight, Copy, Check } from 'lucide-react';
 import { useRealtimeMemes } from '@/hooks/useRealtimeMemes';
 import type { Meme } from '@/types/database';
 
 type SortOption = 'newest' | 'trust_high' | 'trust_low' | 'progress' | 'ending_soon';
 
 const ITEMS_PER_PAGE = 20;
+
+const PLATFORM_TOKEN_CA = '6EbtoNRhjrBemVjPo7QpjazdRrHiADkNDUkBbzCTpump';
 
 export default function Home() {
   const [filter, setFilter] = useState<'all' | 'backing' | 'live'>('all');
@@ -17,6 +19,13 @@ export default function Home() {
   const [minTrustScore, setMinTrustScore] = useState(0);
   const [showFilters, setShowFilters] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
+  const [caCopied, setCaCopied] = useState(false);
+
+  const handleCopyCA = () => {
+    navigator.clipboard.writeText(PLATFORM_TOKEN_CA);
+    setCaCopied(true);
+    setTimeout(() => setCaCopied(false), 2000);
+  };
 
   // Use real-time memes hook
   const { memes, loading } = useRealtimeMemes({ status: filter });
@@ -109,6 +118,34 @@ export default function Home() {
           Communities form BEFORE tokens launch. Back memes you believe in,
           get in early when they go live on Pump.fun.
         </p>
+        {/* Platform Token CA */}
+        <div className="flex items-center justify-center gap-2 pt-2">
+          <span className="text-sm text-[var(--muted)]">CA:</span>
+          <button
+            onClick={handleCopyCA}
+            className="flex items-center gap-2 px-3 py-1.5 bg-[var(--card)] border border-[var(--border)] rounded-lg hover:border-[var(--accent)] transition-colors group"
+          >
+            <code className="text-xs md:text-sm font-mono text-[var(--foreground)]">
+              {PLATFORM_TOKEN_CA}
+            </code>
+            {caCopied ? (
+              <Check className="w-4 h-4 text-[var(--success)]" />
+            ) : (
+              <Copy className="w-4 h-4 text-[var(--muted)] group-hover:text-[var(--accent)]" />
+            )}
+          </button>
+          <a
+            href="https://x.com/ProofLaunch"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-[var(--card)] border border-[var(--border)] rounded-lg hover:border-[var(--accent)] transition-colors group"
+          >
+            <svg className="w-4 h-4 text-[var(--muted)] group-hover:text-[var(--accent)]" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
+            </svg>
+            <span className="text-sm text-[var(--muted)] group-hover:text-[var(--accent)]">Follow</span>
+          </a>
+        </div>
       </div>
 
       {/* Stats Bar */}

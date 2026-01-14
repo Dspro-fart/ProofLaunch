@@ -1,9 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createServerClient } from '@/lib/supabase';
-import { launchToken, LaunchConfig, distributeTokensToBackers, BackerInfo } from '@/services/pumpfun';
+import { launchWithBurnerWallets, LaunchConfig, BurnerBackerInfo } from '@/services/pumpfun';
 import { rateLimiters } from '@/lib/rateLimit';
 
-// POST /api/launch - Launch a funded meme token
+// POST /api/launch - Launch a funded meme token with burner wallet flow
+// Creates token with 0 dev buy, then executes buys from each backer's burner wallet
+// Earlier backers get better prices (lower on bonding curve) - rewards early conviction!
 export async function POST(request: NextRequest) {
   try {
     const supabase = createServerClient();
@@ -54,6 +56,30 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // Get all backers for this meme with burner wallet info
+    const { data: backings, error: backingsError } = await supabase
+      .from('backings')
+      .select('backer_wallet, amount_sol, created_at, burner_wallet, encrypted_private_key')
+      .eq('meme_id', meme_id)
+      .eq('status', 'confirmed')
+      .order('created_at', { ascending: true }); // Earliest backers first
+
+    if (backingsError || !backings || backings.length === 0) {
+      return NextResponse.json(
+        { error: 'No confirmed backings found for this meme' },
+        { status: 400 }
+      );
+    }
+
+    // Check that all backings have burner wallets
+    const backingsWithBurners = backings.filter(b => b.burner_wallet && b.encrypted_private_key);
+    if (backingsWithBurners.length === 0) {
+      return NextResponse.json(
+        { error: 'No backings with burner wallets found. Backings may be from old system.' },
+        { status: 400 }
+      );
+    }
+
     // Update status to launching
     await supabase
       .from('memes')
@@ -74,18 +100,36 @@ export async function POST(request: NextRequest) {
       creatorWallet: meme.creator_wallet,
     };
 
-    // Launch on pump.fun
-    const result = await launchToken(config);
+    // Map backings to BurnerBackerInfo format
+    const burnerBackers: BurnerBackerInfo[] = backingsWithBurners.map((b) => ({
+      mainWallet: b.backer_wallet,
+      burnerWallet: b.burner_wallet,
+      encryptedPrivateKey: b.encrypted_private_key,
+      amountSol: Number(b.amount_sol),
+      backedAt: new Date(b.created_at),
+    }));
 
-    if (!result.success) {
+    console.log(`Launching ${config.name} with ${burnerBackers.length} burner wallets...`);
+    console.log('Burner wallets will buy in order of backing time (earliest first = best price)');
+
+    // Launch with the burner wallet flow
+    const result = await launchWithBurnerWallets(config, burnerBackers);
+
+    if (!result.success || !result.mintAddress) {
       // Revert status on failure
       await supabase
         .from('memes')
         .update({ status: 'funded' })
         .eq('id', meme_id);
 
+      console.error('Launch failed:', result.error);
+      console.error('Buy results:', JSON.stringify(result.buyResults, null, 2));
+
       return NextResponse.json(
-        { error: result.error || 'Launch failed' },
+        {
+          error: result.error || 'Launch failed',
+          buyResults: result.buyResults,
+        },
         { status: 500 }
       );
     }
@@ -106,57 +150,72 @@ export async function POST(request: NextRequest) {
       wallet: meme.creator_wallet,
     });
 
-    // Get all backers for this meme to distribute tokens
-    const { data: backings, error: backingsError } = await supabase
-      .from('backings')
-      .select('backer_wallet, amount_sol')
-      .eq('meme_id', meme_id)
-      .eq('status', 'confirmed');
+    // Update backing records with buy results
+    for (const buyResult of result.buyResults) {
+      // Update if buy was successful (has signature) OR if tokens were received
+      // Also consider it successful if there was no error (some buys succeed without returning signature)
+      const hasSignature = !!buyResult.buySignature;
+      const hasTokens = (buyResult.tokensReceived || 0) > 0;
+      const noError = !buyResult.error;
+      const wasSuccessful = hasSignature || hasTokens || noError;
 
-    let distributionResult = null;
+      console.log(`Updating backing for ${buyResult.mainWallet}:`, {
+        hasSignature,
+        hasTokens,
+        noError,
+        wasSuccessful,
+        buySignature: buyResult.buySignature,
+        tokensReceived: buyResult.tokensReceived,
+        error: buyResult.error,
+      });
 
-    if (!backingsError && backings && backings.length > 0 && result.mintAddress) {
-      console.log(`Distributing tokens to ${backings.length} backers...`);
+      const updateResult = await supabase
+        .from('backings')
+        .update({
+          status: wasSuccessful ? 'distributed' : 'confirmed',
+          tokens_received: buyResult.tokensReceived || 0,
+          burner_buy_executed: wasSuccessful,
+          burner_buy_signature: buyResult.buySignature || null,
+        })
+        .eq('meme_id', meme_id)
+        .eq('backer_wallet', buyResult.mainWallet)
+        .select();
 
-      // Map backings to BackerInfo format
-      const backerInfos: BackerInfo[] = backings.map((b) => ({
-        wallet: b.backer_wallet,
-        amountSol: Number(b.amount_sol),
-      }));
-
-      // Distribute tokens proportionally
-      distributionResult = await distributeTokensToBackers(
-        result.mintAddress,
-        backerInfos,
-        Number(meme.current_backing_sol)
-      );
-
-      // Update backing records with distribution info
-      if (distributionResult.success) {
-        for (const distResult of distributionResult.results) {
-          if (distResult.signature) {
-            await supabase
-              .from('backings')
-              .update({
-                status: 'distributed',
-                tokens_received: distResult.tokensTransferred,
-                distribution_tx: distResult.signature,
-              })
-              .eq('meme_id', meme_id)
-              .eq('backer_wallet', distResult.wallet);
-          }
+      if (updateResult.error) {
+        console.error(`Failed to update backing for ${buyResult.mainWallet}:`, updateResult.error);
+      } else {
+        const rowsUpdated = updateResult.data?.length || 0;
+        console.log(`Updated backing for ${buyResult.mainWallet}: ${rowsUpdated} rows affected`);
+        if (rowsUpdated === 0) {
+          console.error(`WARNING: No rows updated! meme_id=${meme_id}, backer_wallet=${buyResult.mainWallet}`);
+          // Debug: check what backings exist for this meme
+          const { data: existingBackings } = await supabase
+            .from('backings')
+            .select('backer_wallet, status')
+            .eq('meme_id', meme_id);
+          console.log('Existing backings for this meme:', existingBackings);
         }
       }
-
-      console.log('Token distribution complete:', distributionResult);
     }
+
+    const successfulBuys = result.buyResults.filter(r => r.buySignature).length;
+    console.log(`Launch complete! ${successfulBuys}/${burnerBackers.length} burner buys successful`);
 
     return NextResponse.json({
       success: true,
       mint_address: result.mintAddress,
       pump_fun_url: result.pumpFunUrl,
-      signature: result.signature,
-      distribution: distributionResult,
+      create_signature: result.createSignature,
+      buy_results: result.buyResults.map(r => ({
+        main_wallet: r.mainWallet,
+        burner_wallet: r.burnerWallet,
+        amount_sol: r.amountSol,
+        tokens_received: r.tokensReceived,
+        success: !!r.buySignature,
+        error: r.error,
+      })),
+      total_backers: burnerBackers.length,
+      successful_buys: successfulBuys,
     });
   } catch (error) {
     console.error('Launch error:', error);

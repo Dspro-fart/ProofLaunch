@@ -5,7 +5,6 @@ export interface TrustScoreParams {
   creator_fee_pct: number;      // 0-10%
   backer_share_pct: number;     // 50-90%
   dev_initial_buy_sol: number;  // 0+ SOL
-  auto_refund: boolean;
   backing_goal_sol: number;     // Used to calculate dev buy as % of goal
   duration: number;             // Backing duration in days
 }
@@ -23,24 +22,24 @@ export interface TrustScoreBreakdown {
 
 // Calculate individual component scores
 function getCreatorFeeScore(pct: number): { points: number; description: string } {
-  // 0% = +25, 2% = +20, 5% = +10, 10% = 0
-  if (pct <= 0) return { points: 25, description: 'No creator fee' };
-  if (pct <= 1) return { points: 22, description: 'Minimal fee (1%)' };
-  if (pct <= 2) return { points: 20, description: 'Low fee (2%)' };
-  if (pct <= 3) return { points: 15, description: 'Standard fee (3%)' };
-  if (pct <= 5) return { points: 10, description: 'Above average fee' };
-  if (pct <= 7) return { points: 5, description: 'High fee' };
+  // 0% = +30, 2% = +24, 5% = +12, 10% = 0
+  if (pct <= 0) return { points: 30, description: 'No creator fee' };
+  if (pct <= 1) return { points: 27, description: 'Minimal fee (1%)' };
+  if (pct <= 2) return { points: 24, description: 'Low fee (2%)' };
+  if (pct <= 3) return { points: 18, description: 'Standard fee (3%)' };
+  if (pct <= 5) return { points: 12, description: 'Above average fee' };
+  if (pct <= 7) return { points: 6, description: 'High fee' };
   return { points: 0, description: 'Maximum fee (10%)' };
 }
 
 function getBackerShareScore(pct: number): { points: number; description: string } {
-  // 90% = +25, 70% = +15, 50% = 0
-  if (pct >= 90) return { points: 25, description: 'Max backer share (90%)' };
-  if (pct >= 85) return { points: 22, description: 'Very high share (85%)' };
-  if (pct >= 80) return { points: 20, description: 'High share (80%)' };
-  if (pct >= 75) return { points: 17, description: 'Good share (75%)' };
-  if (pct >= 70) return { points: 15, description: 'Standard share (70%)' };
-  if (pct >= 60) return { points: 8, description: 'Below average share' };
+  // 90% = +30, 70% = +18, 50% = 0
+  if (pct >= 90) return { points: 30, description: 'Max backer share (90%)' };
+  if (pct >= 85) return { points: 27, description: 'Very high share (85%)' };
+  if (pct >= 80) return { points: 24, description: 'High share (80%)' };
+  if (pct >= 75) return { points: 21, description: 'Good share (75%)' };
+  if (pct >= 70) return { points: 18, description: 'Standard share (70%)' };
+  if (pct >= 60) return { points: 10, description: 'Below average share' };
   return { points: 0, description: 'Minimum share (50%)' };
 }
 
@@ -48,19 +47,13 @@ function getDevBuyScore(devBuySol: number, goalSol: number): { points: number; d
   // Calculate as percentage of goal
   const pctOfGoal = (devBuySol / goalSol) * 100;
 
-  // 0% = +25, 5% = +15, 10% = +10, 25% = +5, 50%+ = 0
-  if (devBuySol === 0) return { points: 25, description: 'No dev snipe' };
-  if (pctOfGoal <= 5) return { points: 20, description: 'Tiny dev buy (<5%)' };
-  if (pctOfGoal <= 10) return { points: 15, description: 'Small dev buy (10%)' };
-  if (pctOfGoal <= 25) return { points: 10, description: 'Moderate dev buy' };
-  if (pctOfGoal <= 50) return { points: 5, description: 'Large dev buy' };
+  // 0% = +30, 5% = +18, 10% = +12, 25% = +6, 50%+ = 0
+  if (devBuySol === 0) return { points: 30, description: 'No dev snipe' };
+  if (pctOfGoal <= 5) return { points: 24, description: 'Tiny dev buy (<5%)' };
+  if (pctOfGoal <= 10) return { points: 18, description: 'Small dev buy (10%)' };
+  if (pctOfGoal <= 25) return { points: 12, description: 'Moderate dev buy' };
+  if (pctOfGoal <= 50) return { points: 6, description: 'Large dev buy' };
   return { points: 0, description: 'Dev buying most of supply' };
-}
-
-function getAutoRefundScore(autoRefund: boolean): { points: number; description: string } {
-  return autoRefund
-    ? { points: 15, description: 'Auto-refund enabled' }
-    : { points: 0, description: 'Manual refunds only' };
 }
 
 function getDurationScore(days: number): { points: number; description: string } {
@@ -76,10 +69,9 @@ export function calculateTrustScore(params: TrustScoreParams): TrustScoreBreakdo
   const creatorFee = getCreatorFeeScore(params.creator_fee_pct);
   const backerShare = getBackerShareScore(params.backer_share_pct);
   const devBuy = getDevBuyScore(params.dev_initial_buy_sol, params.backing_goal_sol);
-  const autoRefund = getAutoRefundScore(params.auto_refund);
   const duration = getDurationScore(params.duration);
 
-  const total = creatorFee.points + backerShare.points + devBuy.points + autoRefund.points + duration.points;
+  const total = creatorFee.points + backerShare.points + devBuy.points + duration.points;
 
   return {
     total,
@@ -88,29 +80,22 @@ export function calculateTrustScore(params: TrustScoreParams): TrustScoreBreakdo
         label: 'Creator Fee',
         value: `${params.creator_fee_pct}%`,
         points: creatorFee.points,
-        maxPoints: 25,
+        maxPoints: 30,
         description: creatorFee.description,
       },
       {
         label: 'Backer Share',
         value: `${params.backer_share_pct}%`,
         points: backerShare.points,
-        maxPoints: 25,
+        maxPoints: 30,
         description: backerShare.description,
       },
       {
         label: 'Dev Initial Buy',
         value: params.dev_initial_buy_sol === 0 ? 'None' : `${params.dev_initial_buy_sol} SOL`,
         points: devBuy.points,
-        maxPoints: 25,
+        maxPoints: 30,
         description: devBuy.description,
-      },
-      {
-        label: 'Auto Refund',
-        value: params.auto_refund ? 'Yes' : 'No',
-        points: autoRefund.points,
-        maxPoints: 15,
-        description: autoRefund.description,
       },
       {
         label: 'Backing Duration',

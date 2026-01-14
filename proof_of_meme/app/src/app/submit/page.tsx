@@ -7,9 +7,8 @@ import { Upload, Info, Rocket, AlertCircle, Image, Link2, X, CheckCircle, Shield
 import { calculateTrustScore, getTrustScoreColor, getTrustScoreLabel, getTrustScoreBgColor } from '@/lib/trustScore';
 import { PublicKey, Transaction, SystemProgram, LAMPORTS_PER_SOL } from '@solana/web3.js';
 
-// Creation fee in SOL (goes towards the meme's backing)
-const CREATION_FEE_SOL = 0.01;
-const ESCROW_WALLET = new PublicKey('HfkGmHTpQigABpkSK3ECETTxdBgFyt2CgYVoCLDqDffv');
+// Creation fee in SOL (goes to escrow to cover launch costs like metadata rent)
+const CREATION_FEE_SOL = 0.02;
 
 // Validation helpers
 const FORBIDDEN_WORDS = ['scam', 'rug', 'rugpull', 'hack', 'steal'];
@@ -85,7 +84,6 @@ export default function SubmitPage() {
     creatorFeePct: 2,
     backerSharePct: 70,
     devInitialBuySol: 0,
-    autoRefund: true,
   });
 
   // Calculate trust score in real-time
@@ -94,11 +92,10 @@ export default function SubmitPage() {
       creator_fee_pct: formData.creatorFeePct,
       backer_share_pct: formData.backerSharePct,
       dev_initial_buy_sol: formData.devInitialBuySol,
-      auto_refund: formData.autoRefund,
       backing_goal_sol: formData.solGoal,
       duration: formData.duration,
     });
-  }, [formData.creatorFeePct, formData.backerSharePct, formData.devInitialBuySol, formData.autoRefund, formData.solGoal, formData.duration]);
+  }, [formData.creatorFeePct, formData.backerSharePct, formData.devInitialBuySol, formData.solGoal, formData.duration]);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -186,17 +183,43 @@ export default function SubmitPage() {
       return;
     }
 
+    // Extra validation before spending SOL - check all required fields
+    if (!formData.name.trim()) {
+      setError('Name is required');
+      return;
+    }
+    if (!formData.symbol.trim()) {
+      setError('Symbol is required');
+      return;
+    }
+    if (!formData.description.trim()) {
+      setError('Description is required');
+      return;
+    }
+
     setIsSubmitting(true);
     setError(null);
 
     try {
-      // Step 1: Pay the creation fee (goes to escrow as initial backing)
+      // Step 1: Get escrow address for creation fee
+      const configRes = await fetch('/api/config');
+      if (!configRes.ok) {
+        throw new Error('Failed to get platform config');
+      }
+      const config = await configRes.json();
+      const escrowAddress = config.escrow_address;
+
+      if (!escrowAddress) {
+        throw new Error('Escrow address not configured');
+      }
+
+      // Step 2: Pay the creation fee to the escrow wallet (covers launch costs)
       const creationFeeLamports = CREATION_FEE_SOL * LAMPORTS_PER_SOL;
 
       const transaction = new Transaction().add(
         SystemProgram.transfer({
           fromPubkey: publicKey,
-          toPubkey: ESCROW_WALLET,
+          toPubkey: new PublicKey(escrowAddress),
           lamports: creationFeeLamports,
         })
       );
@@ -208,10 +231,9 @@ export default function SubmitPage() {
       const signature = await sendTransaction(transaction, connection);
 
       // Wait briefly for transaction to propagate
-      // The API will verify the transaction - no need to wait for full confirmation
       await new Promise(resolve => setTimeout(resolve, 2000));
 
-      // Step 2: Create the meme with the payment signature
+      // Step 2: Create the meme with the payment signature and burner wallet
       let imageUrl = 'https://placehold.co/400x400/1a1a2e/ffffff?text=' + formData.symbol;
 
       if (imageFile) {
@@ -224,9 +246,9 @@ export default function SubmitPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           creator_wallet: publicKey.toBase58(),
-          name: formData.name,
-          symbol: formData.symbol.toUpperCase(),
-          description: formData.description,
+          name: formData.name.trim(),
+          symbol: formData.symbol.toUpperCase().trim(),
+          description: formData.description.trim(),
           image_url: imageUrl,
           twitter: formData.twitter || undefined,
           telegram: formData.telegram || undefined,
@@ -238,9 +260,8 @@ export default function SubmitPage() {
           creator_fee_pct: formData.creatorFeePct,
           backer_share_pct: formData.backerSharePct,
           dev_initial_buy_sol: formData.devInitialBuySol,
-          auto_refund: formData.autoRefund,
           trust_score: trustScore.total,
-          // Creation fee payment
+          // Creation fee payment (goes to escrow for platform costs)
           creation_fee_signature: signature,
           creation_fee_sol: CREATION_FEE_SOL,
         }),
@@ -259,7 +280,8 @@ export default function SubmitPage() {
         router.push(`/meme/${data.meme.id}`);
       }, 2000);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Something went wrong');
+      const errorMsg = err instanceof Error ? err.message : 'Something went wrong';
+      setError(errorMsg);
     } finally {
       setIsSubmitting(false);
     }
@@ -313,6 +335,38 @@ export default function SubmitPage() {
             Your meme is now in the Proving Grounds. Redirecting...
           </p>
           <div className="w-8 h-8 border-2 border-[var(--accent)]/30 border-t-[var(--accent)] rounded-full animate-spin mx-auto" />
+        </div>
+      </div>
+    );
+  }
+
+  // Submissions are currently paused for maintenance
+  const submissionsPaused = false;
+
+  if (submissionsPaused) {
+    return (
+      <div className="max-w-2xl mx-auto">
+        <div className="text-center mb-8">
+          <h1 className="text-3xl font-bold mb-2">
+            <span className="gradient-text">Submit Your Meme</span>
+          </h1>
+        </div>
+
+        {/* Under Construction Banner */}
+        <div className="card p-8 text-center">
+          <div className="flex items-center justify-center gap-2 text-[var(--warning)] font-semibold mb-4">
+            <svg className="w-12 h-12" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+            </svg>
+          </div>
+          <h2 className="text-2xl font-bold mb-4 text-[var(--warning)]">Under Construction</h2>
+          <p className="text-[var(--muted)] mb-6">
+            We&apos;re making improvements to the launch system. Meme submissions are temporarily paused.
+          </p>
+          <p className="text-sm text-[var(--muted)]">
+            Existing backers&apos; funds are safe and will be honored when we reopen.
+            Check back soon!
+          </p>
         </div>
       </div>
     );
@@ -596,6 +650,8 @@ export default function SubmitPage() {
                   onChange={handleChange}
                   className="w-full px-4 py-3 rounded-lg bg-[var(--background)] border border-[var(--border)] focus:border-[var(--accent)] focus:outline-none"
                 >
+                  <option value={0.1}>0.1 SOL (Testing)</option>
+                  <option value={1}>1 SOL</option>
                   <option value={5}>5 SOL</option>
                   <option value={10}>10 SOL</option>
                   <option value={25}>25 SOL</option>
@@ -705,26 +761,6 @@ export default function SubmitPage() {
                 <span>0 SOL (No snipe - max trust)</span>
                 <span>{formData.solGoal} SOL (Buying all)</span>
               </div>
-            </div>
-
-            {/* Auto Refund Toggle */}
-            <div className="flex items-center justify-between p-3 bg-[var(--background)] rounded-lg">
-              <div>
-                <label className="text-sm font-medium">Auto-Refund on Failure</label>
-                <p className="text-xs text-[var(--muted)]">
-                  Automatically refund backers if goal isn't reached
-                </p>
-              </div>
-              <label className="relative inline-flex items-center cursor-pointer">
-                <input
-                  type="checkbox"
-                  name="autoRefund"
-                  checked={formData.autoRefund}
-                  onChange={handleChange}
-                  className="sr-only peer"
-                />
-                <div className="w-11 h-6 bg-[var(--border)] peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-[var(--accent)]"></div>
-              </label>
             </div>
 
             {/* Trust Score Breakdown */}

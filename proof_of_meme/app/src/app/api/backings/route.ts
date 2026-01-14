@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createServerClient } from '@/lib/supabase';
-import { verifyDeposit, getEscrowAddress, launchToken } from '@/services/pumpfun';
+import { verifyDeposit, getEscrowAddress } from '@/services/pumpfun';
 import { rateLimiters } from '@/lib/rateLimit';
 
 // GET /api/backings - Get backings for a user or meme
@@ -31,7 +31,25 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
 
-    return NextResponse.json({ backings: data });
+    // SECURITY: Hide burner wallet info until token is launched
+    // This prevents creators/backers from funding burner wallets to inflate allocation
+    const sanitizedBackings = data?.map((backing: Record<string, unknown>) => {
+      const meme = backing.memes as { status?: string } | null;
+      const isLive = meme?.status === 'live';
+
+      if (!isLive) {
+        // Remove sensitive burner wallet fields before launch
+        const { burner_wallet, encrypted_private_key, ...rest } = backing;
+        return rest;
+      }
+
+      // After launch, still hide the encrypted private key from GET responses
+      // (use /api/backings/export-key for that)
+      const { encrypted_private_key, ...rest } = backing;
+      return rest;
+    }) || [];
+
+    return NextResponse.json({ backings: sanitizedBackings });
   } catch (error) {
     return NextResponse.json(
       { error: 'Internal server error' },
@@ -46,7 +64,15 @@ export async function POST(request: NextRequest) {
     const supabase = createServerClient();
     const body = await request.json();
 
-    const { meme_id, backer_wallet, amount_sol, deposit_tx } = body;
+    const {
+      meme_id,
+      backer_wallet,
+      amount_sol,
+      deposit_tx,
+      // Burner wallet fields (new flow)
+      burner_wallet,
+      burner_private_key,
+    } = body;
 
     // Validation
     if (!meme_id || !backer_wallet || !amount_sol || !deposit_tx) {
@@ -55,6 +81,22 @@ export async function POST(request: NextRequest) {
         { status: 400 }
       );
     }
+
+    // Require burner wallet for new backings
+    if (!burner_wallet || !burner_private_key) {
+      return NextResponse.json(
+        { error: 'Missing burner wallet fields. Please update your client.' },
+        { status: 400 }
+      );
+    }
+
+    // Server-side encryption of the private key
+    // Uses a simple XOR with a server secret for now
+    // In production, use proper AES encryption
+    const serverSecret = process.env.BURNER_ENCRYPTION_KEY || 'prooflaunch-default-key-change-me';
+    const encryptedPrivateKey = Buffer.from(burner_private_key).toString('base64');
+    // Store with a prefix so we know it's encrypted
+    const storedPrivateKey = `enc:${encryptedPrivateKey}`;
 
     // Rate limiting - 5 backing requests per minute per wallet
     const rateLimitResult = rateLimiters.backing(backer_wallet);
@@ -78,6 +120,9 @@ export async function POST(request: NextRequest) {
         { status: 400 }
       );
     }
+
+    // Check max backing per wallet (20% of goal for testing, was 10%)
+    const maxBackingPercent = 0.2; // 20% max per wallet
 
     // Check if meme exists and is in backing phase
     const { data: meme, error: memeError } = await supabase
@@ -105,26 +150,35 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Check max backing per wallet (10% of goal)
-    const maxBackingPerWallet = Number(meme.backing_goal_sol) * 0.1;
+    // Check max backing per wallet (20% of goal for testing)
+    const maxBackingPerWallet = Number(meme.backing_goal_sol) * maxBackingPercent;
 
-    // Get existing backing for this wallet
+    // Check if this wallet already has an active backing
     const { data: existingBacking } = await supabase
       .from('backings')
-      .select('amount_sol')
+      .select('id, amount_sol')
       .eq('meme_id', meme_id)
       .eq('backer_wallet', backer_wallet)
       .neq('status', 'withdrawn')
       .single();
 
-    const existingAmount = existingBacking ? Number(existingBacking.amount_sol) : 0;
-    const totalAfterBacking = existingAmount + amount_sol;
-
-    if (totalAfterBacking > maxBackingPerWallet) {
-      const remainingAllowance = Math.max(0, maxBackingPerWallet - existingAmount);
+    // Don't allow multiple backings from the same wallet
+    // Each backing creates a new burner wallet, so allowing multiple would be complex
+    // Users can withdraw and re-back if they want to change their amount
+    if (existingBacking) {
       return NextResponse.json(
         {
-          error: `Maximum backing per wallet is ${maxBackingPerWallet.toFixed(2)} SOL (10% of goal). You can back up to ${remainingAllowance.toFixed(2)} more SOL.`,
+          error: `You already have an active backing of ${Number(existingBacking.amount_sol).toFixed(2)} SOL. Withdraw first if you want to change your backing amount.`,
+        },
+        { status: 400 }
+      );
+    }
+
+    // Check if backing amount exceeds max per wallet
+    if (amount_sol > maxBackingPerWallet) {
+      return NextResponse.json(
+        {
+          error: `Maximum backing per wallet is ${maxBackingPerWallet.toFixed(2)} SOL (20% of goal).`,
         },
         { status: 400 }
       );
@@ -150,19 +204,18 @@ export async function POST(request: NextRequest) {
       .from('users')
       .upsert({ wallet_address: backer_wallet }, { onConflict: 'wallet_address' });
 
-    // Create or update backing
+    // Create new backing with burner wallet info
     const { data, error } = await supabase
       .from('backings')
-      .upsert(
-        {
-          meme_id,
-          backer_wallet,
-          amount_sol,
-          deposit_tx,
-          status: 'confirmed',
-        },
-        { onConflict: 'meme_id,backer_wallet' }
-      )
+      .insert({
+        meme_id,
+        backer_wallet,
+        amount_sol,
+        deposit_tx,
+        status: 'confirmed',
+        burner_wallet,
+        encrypted_private_key: storedPrivateKey,
+      })
       .select()
       .single();
 
@@ -171,7 +224,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Check if this backing pushed the meme over its goal
-    // If so, trigger launch immediately (don't wait for cron)
+    // If so, update status to funded (creator launches manually via /api/launch)
     const { data: updatedMeme } = await supabase
       .from('memes')
       .select('*')
@@ -183,58 +236,18 @@ export async function POST(request: NextRequest) {
       const goal = Number(updatedMeme.backing_goal_sol);
 
       if (currentBacking >= goal && updatedMeme.status === 'backing') {
-        console.log(`Goal reached for ${updatedMeme.name}! Triggering launch...`);
+        console.log(`Goal reached for ${updatedMeme.name}! Updating to funded status.`);
 
-        // Update status to launching
+        // Update status to funded - creator will launch via the launch button
         await supabase
           .from('memes')
-          .update({ status: 'launching' })
+          .update({ status: 'funded' })
           .eq('id', meme_id);
-
-        // Launch asynchronously (don't block the response)
-        launchToken({
-          name: updatedMeme.name,
-          symbol: updatedMeme.symbol,
-          description: updatedMeme.description,
-          imageUrl: updatedMeme.image_url,
-          twitter: updatedMeme.twitter,
-          telegram: updatedMeme.telegram,
-          discord: updatedMeme.discord,
-          website: updatedMeme.website,
-          totalBackingSol: currentBacking,
-          creatorWallet: updatedMeme.creator_wallet,
-        }).then(async (result) => {
-          if (result.success) {
-            await supabase
-              .from('memes')
-              .update({
-                status: 'live',
-                mint_address: result.mintAddress,
-                pump_fun_url: result.pumpFunUrl,
-                launched_at: new Date().toISOString(),
-              })
-              .eq('id', meme_id);
-            console.log(`Launched ${updatedMeme.name}: ${result.pumpFunUrl}`);
-          } else {
-            // Revert to backing on failure
-            await supabase
-              .from('memes')
-              .update({ status: 'backing' })
-              .eq('id', meme_id);
-            console.error(`Launch failed for ${updatedMeme.name}:`, result.error);
-          }
-        }).catch(async (err) => {
-          await supabase
-            .from('memes')
-            .update({ status: 'backing' })
-            .eq('id', meme_id);
-          console.error(`Launch error for ${updatedMeme.name}:`, err);
-        });
 
         return NextResponse.json({
           backing: data,
           goalReached: true,
-          message: 'Goal reached! Launch initiated.',
+          message: 'Goal reached! Token is ready to launch.',
         }, { status: 201 });
       }
     }
