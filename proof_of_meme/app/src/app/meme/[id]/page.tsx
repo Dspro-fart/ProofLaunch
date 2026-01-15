@@ -96,6 +96,7 @@ export default function MemeDetailPage() {
   // Platform config
   const [escrowAddress, setEscrowAddress] = useState<string | null>(null);
   const PLATFORM_FEE_PERCENT = 0.02; // 2%
+  const PLATFORM_FEE_MINIMUM = 0.01; // 0.01 SOL minimum
 
   // Use real-time hooks for meme and backings
   const { meme, loading, error, refetch: refetchMeme } = useRealtimeMeme(id as string);
@@ -171,11 +172,11 @@ export default function MemeDetailPage() {
       return;
     }
 
-    // Check max backing limit (20% of goal)
-    const maxBackingPerWallet = Number(meme.backing_goal_sol) * 0.2;
+    // Check max backing limit (10% of goal)
+    const maxBackingPerWallet = Number(meme.backing_goal_sol) * 0.1;
     if (amountSol > maxBackingPerWallet) {
       setBackingStatus(
-        `Error: Maximum backing is ${maxBackingPerWallet.toFixed(2)} SOL per wallet (20% of goal).`
+        `Error: Maximum backing is ${maxBackingPerWallet.toFixed(2)} SOL per wallet (10% of goal).`
       );
       return;
     }
@@ -198,10 +199,11 @@ export default function MemeDetailPage() {
       setPendingBurnerKeypair(burnerWallet.keypair);
 
       // 3. Create SOL transfer transaction to burner wallet + platform fee
-      // User sends backing amount to burner wallet, and 2% fee to escrow
+      // User sends backing amount to burner wallet, and fee (2% or 0.01 SOL minimum) to escrow
       const burnerPubkey = new PublicKey(burnerWallet.publicKey);
       const backingLamports = Math.floor(amountSol * LAMPORTS_PER_SOL);
-      const feeLamports = Math.floor(amountSol * PLATFORM_FEE_PERCENT * LAMPORTS_PER_SOL);
+      const platformFee = Math.max(amountSol * PLATFORM_FEE_PERCENT, PLATFORM_FEE_MINIMUM);
+      const feeLamports = Math.floor(platformFee * LAMPORTS_PER_SOL);
 
       const transaction = new Transaction();
 
@@ -232,7 +234,7 @@ export default function MemeDetailPage() {
       transaction.feePayer = publicKey;
 
       // 4. Send transaction via wallet
-      const totalSol = (amountSol * (1 + PLATFORM_FEE_PERCENT)).toFixed(4);
+      const totalSol = (amountSol + platformFee).toFixed(4);
       setBackingStatus(`Approve transfer of ${totalSol} SOL...`);
       const txSignature = await sendTransaction(transaction, connection);
 
@@ -300,11 +302,11 @@ export default function MemeDetailPage() {
           return;
         }
 
-        // Check max backing limit (20% of goal)
-        const maxBackingPerWallet = Number(meme.backing_goal_sol) * 0.2;
+        // Check max backing limit (10% of goal)
+        const maxBackingPerWallet = Number(meme.backing_goal_sol) * 0.1;
         if (amountSol > maxBackingPerWallet) {
           setBackingStatus(
-            `Error: Maximum backing is ${maxBackingPerWallet.toFixed(2)} SOL per wallet (20% of goal).`
+            `Error: Maximum backing is ${maxBackingPerWallet.toFixed(2)} SOL per wallet (10% of goal).`
           );
           return;
         }
@@ -553,7 +555,7 @@ export default function MemeDetailPage() {
   const isFunded = status === 'funded';
   const isLaunching = status === 'launching';
   const isLaunched = status === 'live';
-  const maxBacking = Number(backing_goal_sol) * 0.2; // 20% for testing
+  const maxBacking = Number(backing_goal_sol) * 0.1; // 10% max per wallet
   const isCreator = connected && publicKey?.toBase58() === creator_wallet;
   const isBacker = connected && backings.some(
     (b) => b.backer_wallet === publicKey?.toBase58() && b.status === 'distributed'
@@ -982,7 +984,7 @@ export default function MemeDetailPage() {
             <ul className="space-y-2 text-sm text-[var(--muted)]">
               <li className="flex items-start gap-2">
                 <span className="text-[var(--accent)]">•</span>
-                Maximum backing per wallet: {maxBacking.toFixed(1)} SOL (20% of goal)
+                Maximum backing per wallet: {maxBacking.toFixed(1)} SOL (10% of goal)
               </li>
               <li className="flex items-start gap-2">
                 <span className="text-[var(--accent)]">•</span>

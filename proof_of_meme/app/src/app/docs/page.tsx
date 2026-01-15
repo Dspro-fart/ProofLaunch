@@ -154,8 +154,8 @@ export default function DocsPage() {
           <li className="flex items-start gap-3">
             <CheckCircle className="w-5 h-5 text-[var(--success)] mt-0.5 flex-shrink-0" />
             <span className="text-[var(--muted)]">
-              <strong className="text-[var(--foreground)]">Max 20% per wallet</strong> - No single
-              wallet can back more than 20% of the goal, ensuring fair distribution.
+              <strong className="text-[var(--foreground)]">Max 10% per wallet</strong> - No single
+              wallet can back more than 10% of the goal, ensuring fair distribution.
             </span>
           </li>
           <li className="flex items-start gap-3">
@@ -270,11 +270,11 @@ export default function DocsPage() {
           <div className="bg-[var(--background)] rounded-lg p-4 border-l-4 border-[var(--success)]">
             <div className="flex justify-between items-center mb-2">
               <span className="font-medium">Platform Fee (Backing)</span>
-              <span className="text-sm font-semibold text-[var(--success)]">2%</span>
+              <span className="text-sm font-semibold text-[var(--success)]">2% or 0.01 SOL min</span>
             </div>
             <p className="text-sm text-[var(--muted)]">
-              Added to each backing. If you back 1 SOL, you pay 1.02 SOL total. The 0.02 SOL
-              goes to platform operations.
+              Added to each backing: 2% of your backing amount, or 0.01 SOL minimum (whichever is higher).
+              For backings under 0.5 SOL, the 0.01 SOL minimum applies.
             </p>
           </div>
           <div className="bg-[var(--background)] rounded-lg p-4 border-l-4 border-[var(--warning)]">
@@ -607,7 +607,7 @@ export default function DocsPage() {
           <div className="bg-[var(--background)] rounded-lg p-4">
             <h3 className="font-semibold mb-2">What's the minimum backing amount?</h3>
             <p className="text-sm text-[var(--muted)]">
-              The minimum is 0.01 SOL. Maximum is 20% of the goal to ensure fair distribution.
+              The minimum is 0.01 SOL. Maximum is 10% of the goal to ensure fair distribution.
             </p>
           </div>
           <div className="bg-[var(--background)] rounded-lg p-4">

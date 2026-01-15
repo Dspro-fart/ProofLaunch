@@ -121,8 +121,8 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Check max backing per wallet (20% of goal for testing, was 10%)
-    const maxBackingPercent = 0.2; // 20% max per wallet
+    // Check max backing per wallet (10% of goal)
+    const maxBackingPercent = 0.1; // 10% max per wallet
 
     // Check if meme exists and is in backing phase
     const { data: meme, error: memeError } = await supabase
@@ -150,7 +150,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Check max backing per wallet (20% of goal for testing)
+    // Check max backing per wallet (10% of goal)
     const maxBackingPerWallet = Number(meme.backing_goal_sol) * maxBackingPercent;
 
     // Check if this wallet already has an active backing
@@ -178,7 +178,7 @@ export async function POST(request: NextRequest) {
     if (amount_sol > maxBackingPerWallet) {
       return NextResponse.json(
         {
-          error: `Maximum backing per wallet is ${maxBackingPerWallet.toFixed(2)} SOL (20% of goal).`,
+          error: `Maximum backing per wallet is ${maxBackingPerWallet.toFixed(2)} SOL (10% of goal).`,
         },
         { status: 400 }
       );
