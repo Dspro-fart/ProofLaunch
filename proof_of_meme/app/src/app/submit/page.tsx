@@ -793,8 +793,8 @@ export default function SubmitPage() {
               <div className="text-sm">
                 <p className="font-medium text-[var(--warning)] mb-1">Creation Fee: {CREATION_FEE_SOL} SOL</p>
                 <p className="text-[var(--muted)]">
-                  A small fee is required to submit your meme. This fee becomes your first backing
-                  and helps prevent spam. You'll need to approve a transaction in your wallet.
+                  A small fee is required to submit your meme. This covers token creation costs on Pump.fun.
+                  To receive tokens at launch, you must also back your own meme separately.
                 </p>
               </div>
             </div>
