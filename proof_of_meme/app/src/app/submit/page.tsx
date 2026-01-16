@@ -21,6 +21,7 @@ interface ValidationErrors {
   name?: string;
   symbol?: string;
   description?: string;
+  creatorTwitter?: string;
   twitter?: string;
   website?: string;
   telegram?: string;
@@ -76,6 +77,7 @@ export default function SubmitPage() {
     description: '',
     solGoal: 10,
     duration: 3,
+    creatorTwitter: '', // Creator's personal X account (Proof Launch only)
     twitter: '',
     website: '',
     telegram: '',
@@ -110,6 +112,7 @@ export default function SubmitPage() {
       name: validateName(formData.name),
       symbol: validateSymbol(formData.symbol),
       description: validateDescription(formData.description),
+      creatorTwitter: validateUrl(formData.creatorTwitter, TWITTER_PATTERN, 'X/Twitter'),
       twitter: validateUrl(formData.twitter, TWITTER_PATTERN, 'X/Twitter'),
       website: validateUrl(formData.website),
       telegram: validateUrl(formData.telegram, TELEGRAM_PATTERN, 'Telegram'),
@@ -142,6 +145,9 @@ export default function SubmitPage() {
       case 'description':
         error = validateDescription(formData.description);
         break;
+      case 'creatorTwitter':
+        error = validateUrl(formData.creatorTwitter, TWITTER_PATTERN, 'X/Twitter');
+        break;
       case 'twitter':
         error = validateUrl(formData.twitter, TWITTER_PATTERN, 'X/Twitter');
         break;
@@ -171,6 +177,7 @@ export default function SubmitPage() {
       name: true,
       symbol: true,
       description: true,
+      creatorTwitter: true,
       twitter: true,
       website: true,
       telegram: true,
@@ -250,6 +257,7 @@ export default function SubmitPage() {
           symbol: formData.symbol.toUpperCase().trim(),
           description: formData.description.trim(),
           image_url: imageUrl,
+          creator_twitter: formData.creatorTwitter || undefined,
           twitter: formData.twitter || undefined,
           telegram: formData.telegram || undefined,
           discord: formData.discord || undefined,
@@ -546,17 +554,48 @@ export default function SubmitPage() {
             </div>
           </div>
 
+          {/* Creator Info */}
+          <div className="card p-6 space-y-4">
+            <h2 className="text-lg font-semibold flex items-center gap-2">
+              <Link2 className="w-5 h-5 text-[var(--accent)]" />
+              Creator Info
+            </h2>
+
+            <div>
+              <label className="block text-sm font-medium mb-2">Your X (Twitter)</label>
+              <input
+                type="text"
+                name="creatorTwitter"
+                value={formData.creatorTwitter}
+                onChange={handleChange}
+                onBlur={() => handleBlur('creatorTwitter')}
+                placeholder="https://x.com/yourusername"
+                className={`w-full px-4 py-3 rounded-lg bg-[var(--background)] border focus:outline-none ${
+                  touched.creatorTwitter && fieldErrors.creatorTwitter
+                    ? 'border-[var(--error)] focus:border-[var(--error)]'
+                    : 'border-[var(--border)] focus:border-[var(--accent)]'
+                }`}
+              />
+              {touched.creatorTwitter && fieldErrors.creatorTwitter && (
+                <span className="text-xs text-[var(--error)]">{fieldErrors.creatorTwitter}</span>
+              )}
+              <span className="text-xs text-[var(--muted)] mt-1 block">
+                Displayed on Proof Launch so backers can see who created this meme. Not included in token metadata.
+              </span>
+            </div>
+          </div>
+
           {/* Social Links */}
           <div className="card p-6 space-y-4">
             <h2 className="text-lg font-semibold flex items-center gap-2">
               <Link2 className="w-5 h-5 text-[var(--accent)]" />
-              Social Links
-              <span className="text-xs font-normal text-[var(--muted)]">(optional - shown on Axiom/Photon)</span>
+              Token Social Links
+              <span className="text-xs font-normal text-[var(--muted)]">(optional - shown on Pump.fun/Axiom/Photon)</span>
             </h2>
 
             <div className="grid grid-cols-2 gap-4">
               <div>
-                <label className="block text-sm font-medium mb-2">X (Twitter)</label>
+                <label className="block text-sm font-medium mb-2">Token X (Twitter)</label>
                 <input
                   type="text"
                   name="twitter"

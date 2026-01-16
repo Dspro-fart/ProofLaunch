@@ -16,6 +16,9 @@ export interface Meme {
   description: string;
   image_url: string;
 
+  // Creator's personal social (Proof Launch only, not in token metadata)
+  creator_twitter?: string;
+
   // Social links (will be in token metadata)
   twitter?: string;
   telegram?: string;

@@ -532,6 +532,7 @@ export default function MemeDetailPage() {
     backer_share_pct = 70,
     dev_initial_buy_sol = 0,
     // Socials
+    creator_twitter,
     twitter,
     telegram,
     discord,
@@ -659,19 +660,34 @@ export default function MemeDetailPage() {
         </div>
 
         {/* Creator Info */}
-        <div className="mt-6 pt-4 border-t border-[var(--border)] flex items-center justify-between">
-          <div className="flex items-center gap-2 text-sm">
-            <span className="text-[var(--muted)]">Created by:</span>
-            <code className="bg-[var(--background)] px-2 py-1 rounded text-xs">
-              {creator_wallet.slice(0, 8)}...{creator_wallet.slice(-8)}
-            </code>
-            <button
-              onClick={() => handleCopy(creator_wallet)}
-              className="text-[var(--muted)] hover:text-[var(--foreground)]"
-            >
-              {copied ? <Check className="w-4 h-4 text-[var(--success)]" /> : <Copy className="w-4 h-4" />}
-            </button>
+        <div className="mt-6 pt-4 border-t border-[var(--border)]">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 text-sm">
+              <span className="text-[var(--muted)]">Created by:</span>
+              <code className="bg-[var(--background)] px-2 py-1 rounded text-xs">
+                {creator_wallet.slice(0, 8)}...{creator_wallet.slice(-8)}
+              </code>
+              <button
+                onClick={() => handleCopy(creator_wallet)}
+                className="text-[var(--muted)] hover:text-[var(--foreground)]"
+              >
+                {copied ? <Check className="w-4 h-4 text-[var(--success)]" /> : <Copy className="w-4 h-4" />}
+              </button>
+            </div>
           </div>
+          {creator_twitter && (
+            <a
+              href={creator_twitter}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-2 mt-2 px-3 py-1.5 bg-[var(--background)] hover:bg-[var(--border)] border border-[var(--border)] rounded-lg text-sm transition-colors"
+            >
+              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
+              </svg>
+              <span>@{creator_twitter.split('/').pop()}</span>
+            </a>
+          )}
         </div>
 
         {/* Contract Address - shown for live tokens */}

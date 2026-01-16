@@ -4,7 +4,7 @@
 
 **Short (160 chars):**
 ```
-Community-backed meme coin launchpad. Prove demand BEFORE launch. Back memes with SOL, get tokens when they go live on pump.fun. No more rugs.
+00
 ```
 
 **Medium (280 chars):**
