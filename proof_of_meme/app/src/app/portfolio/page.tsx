@@ -460,8 +460,8 @@ export default function PortfolioPage() {
                   </div>
                 )}
 
-                {/* Token Wallet Info - only show after launch */}
-                {backing.burner_wallet && isLive && (
+                {/* Token Wallet Info - show after launch OR if meme failed/expired */}
+                {backing.burner_wallet && (isLive || isFailed || (isPastDeadline && !isLive)) && (
                   <div className="mt-3 pt-3 border-t border-[var(--border)]">
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2 text-sm text-[var(--muted)]">
@@ -517,12 +517,12 @@ export default function PortfolioPage() {
                   </div>
                 )}
 
-                {/* Token wallet placeholder - shown before launch */}
-                {!isLive && !isFailed && backing.status === 'confirmed' && (
+                {/* Token wallet placeholder - shown during active backing phase */}
+                {!isLive && !isFailed && !isPastDeadline && backing.status === 'confirmed' && (
                   <div className="mt-3 pt-3 border-t border-[var(--border)]">
                     <div className="flex items-center gap-2 text-sm text-[var(--muted)]">
                       <Key className="w-4 h-4 opacity-50" />
-                      <span className="italic">Token wallet access available after launch</span>
+                      <span className="italic">Burner wallet access available after launch or expiry</span>
                     </div>
                   </div>
                 )}
