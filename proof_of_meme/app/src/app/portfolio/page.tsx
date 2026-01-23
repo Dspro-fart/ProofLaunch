@@ -236,6 +236,23 @@ export default function PortfolioPage() {
     .filter(b => b.status === 'refunded')
     .reduce((sum, b) => sum + b.amount_sol, 0);
 
+  // Filter out refunded/withdrawn backings - they disappear after claiming
+  const visibleBackings = backings.filter(b =>
+    b.status !== 'refunded' && b.status !== 'withdrawn'
+  );
+
+  // Filter out expired created memes with no backings
+  const visibleCreatedMemes = createdMemes.filter(meme => {
+    // Keep all non-backing memes (live, funded, etc.)
+    if (meme.status !== 'backing') return true;
+    // Keep memes that haven't expired yet
+    if (new Date(meme.backing_deadline) > new Date()) return true;
+    // Keep expired memes that have backings
+    if (meme.backer_count && meme.backer_count > 0) return true;
+    // Hide expired memes with no backings
+    return false;
+  });
+
   if (!connected) {
     return (
       <div className="max-w-2xl mx-auto">
@@ -310,7 +327,7 @@ export default function PortfolioPage() {
       <div className="space-y-4">
         <h2 className="text-xl font-semibold">Your Backings</h2>
 
-        {backings.length === 0 ? (
+        {visibleBackings.length === 0 ? (
           <div className="card p-8 text-center">
             <Coins className="w-12 h-12 mx-auto text-[var(--muted)] mb-4 opacity-50" />
             <h3 className="text-lg font-semibold mb-2">No backings yet</h3>
@@ -322,7 +339,7 @@ export default function PortfolioPage() {
             </Link>
           </div>
         ) : (
-          backings.map((backing) => {
+          visibleBackings.map((backing) => {
             const meme = backing.memes;
             const statusBadge = getStatusBadge(meme.status);
             const isProving = meme.status === 'backing';
@@ -539,7 +556,7 @@ export default function PortfolioPage() {
           Your Creations
         </h2>
 
-        {createdMemes.length === 0 ? (
+        {visibleCreatedMemes.length === 0 ? (
           <div className="card p-8 text-center">
             <Sparkles className="w-12 h-12 mx-auto text-[var(--muted)] mb-4 opacity-50" />
             <h3 className="text-lg font-semibold mb-2">No memes created yet</h3>
@@ -551,7 +568,7 @@ export default function PortfolioPage() {
             </Link>
           </div>
         ) : (
-          createdMemes.map((meme) => {
+          visibleCreatedMemes.map((meme) => {
             const statusBadge = getStatusBadge(meme.status);
             const isProving = meme.status === 'backing';
             const isFunded = meme.status === 'funded';
