@@ -11,6 +11,8 @@ export async function GET(request: NextRequest) {
     const creator = searchParams.get('creator');
     const limit = parseInt(searchParams.get('limit') || '1000');
     const offset = parseInt(searchParams.get('offset') || '0');
+    // Hide expired memes after 24 hours by default (unless querying specific creator)
+    const includeStaleExpired = searchParams.get('includeStaleExpired') === 'true';
 
     let query = supabase
       .from('memes_with_stats')
@@ -32,7 +34,22 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
 
-    return NextResponse.json({ memes: data });
+    // Filter out expired memes older than 24 hours (unless creator is specified or includeStaleExpired)
+    let filteredData = data;
+    if (!creator && !includeStaleExpired) {
+      const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      filteredData = data?.filter((meme) => {
+        // Keep all non-backing memes (live, funded, etc.)
+        if (meme.status !== 'backing') return true;
+        // Keep backing memes that haven't expired yet
+        const deadline = new Date(meme.backing_deadline);
+        if (deadline > new Date()) return true;
+        // Keep expired memes that are within 24 hours of deadline
+        return deadline > twentyFourHoursAgo;
+      });
+    }
+
+    return NextResponse.json({ memes: filteredData });
   } catch (error) {
     return NextResponse.json(
       { error: 'Internal server error' },
